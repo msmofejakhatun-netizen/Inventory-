@@ -18,8 +18,11 @@ service cloud.firestore {
     function isMemberOfRestaurant(restaurantId) {
       return isSignedIn() && (
         exists(/databases/$(database)/documents/restaurants/$(restaurantId)/users/$(request.auth.uid)) ||
+        existsAfter(/databases/$(database)/documents/restaurants/$(restaurantId)/users/$(request.auth.uid)) ||
         (exists(/databases/$(database)/documents/restaurants/$(restaurantId)) && 
-         get(/databases/$(database)/documents/restaurants/$(restaurantId)).data.ownerUid == request.auth.uid)
+         get(/databases/$(database)/documents/restaurants/$(restaurantId)).data.ownerUid == request.auth.uid) ||
+        (existsAfter(/databases/$(database)/documents/restaurants/$(restaurantId)) && 
+         getAfter(/databases/$(database)/documents/restaurants/$(restaurantId)).data.ownerUid == request.auth.uid)
       );
     }
 
@@ -31,8 +34,12 @@ service cloud.firestore {
       return isSignedIn() && (
         (exists(/databases/$(database)/documents/restaurants/$(restaurantId)) &&
          get(/databases/$(database)/documents/restaurants/$(restaurantId)).data.ownerUid == request.auth.uid) ||
+        (existsAfter(/databases/$(database)/documents/restaurants/$(restaurantId)) &&
+         getAfter(/databases/$(database)/documents/restaurants/$(restaurantId)).data.ownerUid == request.auth.uid) ||
         (exists(/databases/$(database)/documents/restaurants/$(restaurantId)/users/$(request.auth.uid)) &&
-         getRestaurantUser(restaurantId).role == 'OWNER')
+         getRestaurantUser(restaurantId).role == 'OWNER') ||
+        (existsAfter(/databases/$(database)/documents/restaurants/$(restaurantId)/users/$(request.auth.uid)) &&
+         getAfter(/databases/$(database)/documents/restaurants/$(restaurantId)/users/$(request.auth.uid)).data.role == 'OWNER')
       );
     }
 
@@ -55,7 +62,7 @@ service cloud.firestore {
       allow get: if isUser(userId);
       allow list: if isSignedIn() && resource.data.uid == request.auth.uid;
       allow create: if isUser(userId) && request.resource.data.uid == request.auth.uid;
-      allow update: if isUser(userId) && request.resource.data.uid == request.auth.uid;
+      allow update: if isUser(userId) && (!('uid' in request.resource.data) || request.resource.data.uid == request.auth.uid);
       allow delete: if isUser(userId);
     }
 
@@ -63,14 +70,37 @@ service cloud.firestore {
     match /restaurants/{restaurantId} {
       allow get: if isMemberOfRestaurant(restaurantId);
       allow list: if isSignedIn();
-      allow create: if isSignedIn() && request.resource.data.ownerUid == request.auth.uid;
+      allow create: if isSignedIn() &&
+                    request.resource.data.ownerUid == request.auth.uid &&
+                    request.resource.data.id == restaurantId &&
+                    !exists(/databases/$(database)/documents/restaurants/$(restaurantId)) &&
+                    request.resource.data.name is string &&
+                    request.resource.data.country is string &&
+                    request.resource.data.currency is string;
       allow update: if isRestaurantManager(restaurantId) && request.resource.data.ownerUid == resource.data.ownerUid;
       allow delete: if isRestaurantOwner(restaurantId);
 
       // Staff subcollection
       match /users/{userId} {
         allow get, list: if isMemberOfRestaurant(restaurantId);
-        allow create: if isRestaurantManager(restaurantId);
+        allow create: if (
+          // Authorized Manager/Owner adding staff to existing restaurant
+          isRestaurantManager(restaurantId) &&
+          request.resource.data.role in ['OWNER', 'MANAGER', 'STOREKEEPER', 'DEPARTMENT_STAFF'] &&
+          request.resource.data.restaurantId == restaurantId
+        ) || (
+          // Safe bootstrap for new restaurant OWNER membership
+          isUser(userId) &&
+          request.resource.data.role == 'OWNER' &&
+          request.resource.data.restaurantId == restaurantId &&
+          request.resource.data.uid == userId &&
+          (
+            (existsAfter(/databases/$(database)/documents/restaurants/$(restaurantId)) &&
+             getAfter(/databases/$(database)/documents/restaurants/$(restaurantId)).data.ownerUid == request.auth.uid) ||
+            (exists(/databases/$(database)/documents/restaurants/$(restaurantId)) &&
+             get(/databases/$(database)/documents/restaurants/$(restaurantId)).data.ownerUid == request.auth.uid)
+          )
+        );
         allow update: if isRestaurantManager(restaurantId) || (
           isUser(userId) &&
           request.resource.data.role == resource.data.role &&
