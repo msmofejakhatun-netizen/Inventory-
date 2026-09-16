@@ -1,0 +1,6 @@
+{
+  "name": "Restaurant Store Control System",
+  "description": "Know your stock. Control your cash. Restaurant inventory, purchase, vendor payment, consumption, wastage, stock control and AI purchase planning SaaS.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

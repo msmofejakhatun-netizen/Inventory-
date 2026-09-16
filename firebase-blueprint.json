@@ -1,0 +1,412 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Global user profile mapped to Firebase Auth UID",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "name": { "type": "string", "maxLength": 100 },
+        "email": { "type": "string", "maxLength": 150 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "photoURL": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string" },
+        "lastLoginAt": { "type": "string" },
+        "accountStatus": { "type": "string", "enum": ["active", "suspended"] },
+        "role": { "type": "string", "enum": ["OWNER", "MANAGER", "STOREKEEPER", "DEPARTMENT_STAFF"] },
+        "restaurantIds": { "type": "array" }
+      },
+      "required": ["uid", "name", "createdAt"]
+    },
+    "Restaurant": {
+      "title": "Restaurant",
+      "description": "Multi-tenant restaurant entity",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string", "maxLength": 150 },
+        "address": { "type": "string", "maxLength": 300 },
+        "country": { "type": "string", "maxLength": 50 },
+        "currency": { "type": "string", "maxLength": 10 },
+        "timezone": { "type": "string", "maxLength": 50 },
+        "taxSystem": { "type": "string", "maxLength": 50 },
+        "numberOfOutlets": { "type": "number" },
+        "ownerUid": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "name", "ownerUid", "currency"]
+    },
+    "RestaurantUser": {
+      "title": "RestaurantUser",
+      "description": "Staff membership and role within a specific restaurant",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "name": { "type": "string", "maxLength": 100 },
+        "email": { "type": "string", "maxLength": 150 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "role": { "type": "string", "enum": ["OWNER", "MANAGER", "STOREKEEPER", "DEPARTMENT_STAFF"] },
+        "departmentId": { "type": "string" },
+        "departmentName": { "type": "string" },
+        "restaurantId": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "inactive"] },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["uid", "name", "role", "restaurantId"]
+    },
+    "Department": {
+      "title": "Department",
+      "description": "Kitchen or operational department (Indian, Chinese, Tandoor, Bar, Bakery, etc.)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string", "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 300 },
+        "restaurantId": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "name", "restaurantId"]
+    },
+    "Item": {
+      "title": "Item",
+      "description": "Inventory item master record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string", "maxLength": 150 },
+        "category": { "type": "string", "maxLength": 100 },
+        "unit": { "type": "string", "maxLength": 30 },
+        "departmentId": { "type": "string" },
+        "departmentName": { "type": "string" },
+        "primaryVendorId": { "type": "string" },
+        "primaryVendorName": { "type": "string" },
+        "currentStock": { "type": "number" },
+        "minimumStock": { "type": "number" },
+        "maximumStock": { "type": "number" },
+        "targetStockDays": { "type": "number" },
+        "lastPurchaseRate": { "type": "number" },
+        "averageStockRate": { "type": "number" },
+        "taxPercent": { "type": "number" },
+        "shelfLifeDays": { "type": "number" },
+        "reorderLevel": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "inactive"] },
+        "restaurantId": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "name", "unit", "restaurantId"]
+    },
+    "Vendor": {
+      "title": "Vendor",
+      "description": "Vendor master record with payment and rate tracking",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string", "maxLength": 150 },
+        "mobile": { "type": "string", "maxLength": 30 },
+        "address": { "type": "string", "maxLength": 300 },
+        "taxNumber": { "type": "string", "maxLength": 50 },
+        "paymentTerms": { "type": "string", "maxLength": 100 },
+        "creditDays": { "type": "number" },
+        "openingDue": { "type": "number" },
+        "totalPurchases": { "type": "number" },
+        "totalPaid": { "type": "number" },
+        "currentDue": { "type": "number" },
+        "restaurantId": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "name", "restaurantId"]
+    },
+    "Purchase": {
+      "title": "Purchase",
+      "description": "Raw goods purchase bill received from vendor",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "billNumber": { "type": "string", "maxLength": 100 },
+        "billDate": { "type": "string" },
+        "vendorId": { "type": "string" },
+        "vendorName": { "type": "string" },
+        "totalAmount": { "type": "number" },
+        "taxAmount": { "type": "number" },
+        "netAmount": { "type": "number" },
+        "paymentStatus": { "type": "string", "enum": ["unpaid", "partially_paid", "paid"] },
+        "isOverride": { "type": "boolean" },
+        "overrideReason": { "type": "string" },
+        "itemsCount": { "type": "number" },
+        "recordedByUid": { "type": "string" },
+        "recordedByName": { "type": "string" },
+        "restaurantId": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "vendorId", "billNumber", "netAmount", "restaurantId"]
+    },
+    "StockTransaction": {
+      "title": "StockTransaction",
+      "description": "Immutable ledger record for every stock movement",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "itemId": { "type": "string" },
+        "itemName": { "type": "string" },
+        "type": { "type": "string", "enum": ["PURCHASE_RECEIVE", "DEPT_ISSUE", "EMERGENCY_ISSUE", "WASTAGE", "PHYSICAL_ADJUSTMENT"] },
+        "quantity": { "type": "number" },
+        "rate": { "type": "number" },
+        "value": { "type": "number" },
+        "departmentId": { "type": "string" },
+        "departmentName": { "type": "string" },
+        "staffUid": { "type": "string" },
+        "staffName": { "type": "string" },
+        "reason": { "type": "string" },
+        "referenceId": { "type": "string" },
+        "restaurantId": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "itemId", "type", "quantity", "restaurantId", "createdAt"]
+    },
+    "Issue": {
+      "title": "Issue",
+      "description": "Stock issued to department for kitchen operations",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "departmentId": { "type": "string" },
+        "departmentName": { "type": "string" },
+        "itemId": { "type": "string" },
+        "itemName": { "type": "string" },
+        "quantity": { "type": "number" },
+        "rate": { "type": "number" },
+        "value": { "type": "number" },
+        "staffUid": { "type": "string" },
+        "staffName": { "type": "string" },
+        "issuedByUid": { "type": "string" },
+        "issuedByName": { "type": "string" },
+        "shift": { "type": "string", "enum": ["MORNING", "EVENING", "NIGHT", "GENERAL"] },
+        "restaurantId": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "departmentId", "itemId", "quantity", "staffUid", "restaurantId"]
+    },
+    "EmergencyIssue": {
+      "title": "EmergencyIssue",
+      "description": "Mid-service emergency requisition by kitchen department",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "departmentId": { "type": "string" },
+        "departmentName": { "type": "string" },
+        "itemId": { "type": "string" },
+        "itemName": { "type": "string" },
+        "quantity": { "type": "number" },
+        "reason": { "type": "string", "enum": ["Stock finished", "Unexpected rush", "Wrong estimation", "Wastage", "Preparation increased", "Other"] },
+        "customReason": { "type": "string" },
+        "staffUid": { "type": "string" },
+        "staffName": { "type": "string" },
+        "restaurantId": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "departmentId", "itemId", "quantity", "reason", "restaurantId"]
+    },
+    "Wastage": {
+      "title": "Wastage",
+      "description": "Stock loss due to expiry, spoilage, burning, or damage",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "itemId": { "type": "string" },
+        "itemName": { "type": "string" },
+        "quantity": { "type": "number" },
+        "rate": { "type": "number" },
+        "value": { "type": "number" },
+        "departmentId": { "type": "string" },
+        "departmentName": { "type": "string" },
+        "reason": { "type": "string", "enum": ["Expired", "Spoiled", "Burnt", "Damaged", "Overproduction", "Spillage", "Other"] },
+        "staffUid": { "type": "string" },
+        "staffName": { "type": "string" },
+        "restaurantId": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "itemId", "quantity", "reason", "restaurantId"]
+    },
+    "StockCount": {
+      "title": "StockCount",
+      "description": "Physical stock count and discrepancy audit",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "itemId": { "type": "string" },
+        "itemName": { "type": "string" },
+        "systemStock": { "type": "number" },
+        "physicalStock": { "type": "number" },
+        "varianceQuantity": { "type": "number" },
+        "varianceValue": { "type": "number" },
+        "rate": { "type": "number" },
+        "reason": { "type": "string" },
+        "countedByUid": { "type": "string" },
+        "countedByName": { "type": "string" },
+        "restaurantId": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "itemId", "physicalStock", "reason", "restaurantId"]
+    },
+    "VendorPayment": {
+      "title": "VendorPayment",
+      "description": "Payment disbursed to vendor against bills",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "vendorId": { "type": "string" },
+        "vendorName": { "type": "string" },
+        "amount": { "type": "number" },
+        "paymentMode": { "type": "string", "enum": ["Cash", "UPI", "Bank Transfer", "Card", "Other"] },
+        "reference": { "type": "string" },
+        "recordedByUid": { "type": "string" },
+        "recordedByName": { "type": "string" },
+        "restaurantId": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "vendorId", "amount", "paymentMode", "restaurantId"]
+    },
+    "PurchaseOrder": {
+      "title": "PurchaseOrder",
+      "description": "Consolidated supplier-wise PO generated from inventory requirements",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "poNumber": { "type": "string" },
+        "vendorId": { "type": "string" },
+        "vendorName": { "type": "string" },
+        "status": { "type": "string", "enum": ["DRAFT", "SENT", "PARTIALLY_RECEIVED", "FULFILLED", "CANCELLED"] },
+        "totalEstimatedAmount": { "type": "number" },
+        "items": { "type": "array" },
+        "restaurantId": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "vendorId", "restaurantId"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "In-app alerts for price hikes, stock shortages, excess stock, emergency alerts",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "type": { "type": "string", "enum": ["PRICE_HIKE", "LOW_STOCK", "EXCESS_STOCK", "EMERGENCY_ALERT", "VENDOR_DUE", "WASTAGE", "VARIANCE"] },
+        "severity": { "type": "string", "enum": ["info", "warning", "critical"] },
+        "isRead": { "type": "boolean" },
+        "restaurantId": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "title", "message", "type", "restaurantId"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable security and operational event trail",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "actorUid": { "type": "string" },
+        "actorName": { "type": "string" },
+        "action": { "type": "string" },
+        "entity": { "type": "string" },
+        "entityId": { "type": "string" },
+        "details": { "type": "string" },
+        "restaurantId": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "actorUid", "action", "restaurantId", "createdAt"]
+    },
+    "Subscription": {
+      "title": "Subscription",
+      "description": "Restaurant subscription status, 14-day trial, and ₹99 billing record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "restaurantId": { "type": "string" },
+        "planId": { "type": "string" },
+        "gatewayCustomerId": { "type": "string" },
+        "gatewaySubscriptionId": { "type": "string" },
+        "status": { "type": "string", "enum": ["trialing", "active", "past_due", "cancelled", "expired"] },
+        "startDate": { "type": "string" },
+        "trialEndDate": { "type": "string" },
+        "currentPeriodStart": { "type": "string" },
+        "currentPeriodEnd": { "type": "string" },
+        "cancelAtPeriodEnd": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "restaurantId", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": "UserProfile",
+      "description": "Root user profile document"
+    },
+    "/restaurants/{restaurantId}": {
+      "schema": "Restaurant",
+      "description": "Restaurant tenant root document"
+    },
+    "/restaurants/{restaurantId}/users/{uid}": {
+      "schema": "RestaurantUser",
+      "description": "Restaurant staff members and RBAC"
+    },
+    "/restaurants/{restaurantId}/departments/{departmentId}": {
+      "schema": "Department",
+      "description": "Restaurant departments (Indian, Chinese, etc.)"
+    },
+    "/restaurants/{restaurantId}/items/{itemId}": {
+      "schema": "Item",
+      "description": "Inventory items master with stock levels"
+    },
+    "/restaurants/{restaurantId}/vendors/{vendorId}": {
+      "schema": "Vendor",
+      "description": "Vendor master and payment ledger"
+    },
+    "/restaurants/{restaurantId}/purchases/{purchaseId}": {
+      "schema": "Purchase",
+      "description": "Vendor purchases and bills"
+    },
+    "/restaurants/{restaurantId}/stockTransactions/{transactionId}": {
+      "schema": "StockTransaction",
+      "description": "Immutable ledger of all stock additions and reductions"
+    },
+    "/restaurants/{restaurantId}/issues/{issueId}": {
+      "schema": "Issue",
+      "description": "Stock issued to kitchen departments"
+    },
+    "/restaurants/{restaurantId}/emergencyIssues/{issueId}": {
+      "schema": "EmergencyIssue",
+      "description": "Emergency requisitions during service"
+    },
+    "/restaurants/{restaurantId}/wastage/{wastageId}": {
+      "schema": "Wastage",
+      "description": "Recorded wastage and spoilage"
+    },
+    "/restaurants/{restaurantId}/stockCounts/{countId}": {
+      "schema": "StockCount",
+      "description": "Physical stock count comparisons and variance"
+    },
+    "/restaurants/{restaurantId}/vendorPayments/{paymentId}": {
+      "schema": "VendorPayment",
+      "description": "Disbursed payments to vendors"
+    },
+    "/restaurants/{restaurantId}/purchaseOrders/{poId}": {
+      "schema": "PurchaseOrder",
+      "description": "Supplier-wise consolidated purchase orders"
+    },
+    "/restaurants/{restaurantId}/notifications/{notificationId}": {
+      "schema": "Notification",
+      "description": "In-app notifications and alerts"
+    },
+    "/restaurants/{restaurantId}/auditLogs/{logId}": {
+      "schema": "AuditLog",
+      "description": "Immutable audit events"
+    },
+    "/restaurants/{restaurantId}/subscriptions/{subscriptionId}": {
+      "schema": "Subscription",
+      "description": "Tenant subscription status"
+    }
+  }
+}

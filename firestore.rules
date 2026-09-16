@@ -1,0 +1,204 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Default deny all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isUser(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function isMemberOfRestaurant(restaurantId) {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/restaurants/$(restaurantId)/users/$(request.auth.uid)) ||
+        (exists(/databases/$(database)/documents/restaurants/$(restaurantId)) && 
+         get(/databases/$(database)/documents/restaurants/$(restaurantId)).data.ownerUid == request.auth.uid)
+      );
+    }
+
+    function getRestaurantUser(restaurantId) {
+      return get(/databases/$(database)/documents/restaurants/$(restaurantId)/users/$(request.auth.uid)).data;
+    }
+
+    function isRestaurantOwner(restaurantId) {
+      return isSignedIn() && (
+        (exists(/databases/$(database)/documents/restaurants/$(restaurantId)) &&
+         get(/databases/$(database)/documents/restaurants/$(restaurantId)).data.ownerUid == request.auth.uid) ||
+        (exists(/databases/$(database)/documents/restaurants/$(restaurantId)/users/$(request.auth.uid)) &&
+         getRestaurantUser(restaurantId).role == 'OWNER')
+      );
+    }
+
+    function isRestaurantManager(restaurantId) {
+      return isRestaurantOwner(restaurantId) || (
+        exists(/databases/$(database)/documents/restaurants/$(restaurantId)/users/$(request.auth.uid)) &&
+        getRestaurantUser(restaurantId).role in ['OWNER', 'MANAGER']
+      );
+    }
+
+    function isStorekeeper(restaurantId) {
+      return isRestaurantManager(restaurantId) || (
+        exists(/databases/$(database)/documents/restaurants/$(restaurantId)/users/$(request.auth.uid)) &&
+        getRestaurantUser(restaurantId).role == 'STOREKEEPER'
+      );
+    }
+
+    // Root user profiles
+    match /users/{userId} {
+      allow get: if isUser(userId);
+      allow list: if isSignedIn() && resource.data.uid == request.auth.uid;
+      allow create: if isUser(userId) && request.resource.data.uid == request.auth.uid;
+      allow update: if isUser(userId) && request.resource.data.uid == request.auth.uid;
+      allow delete: if isUser(userId);
+    }
+
+    // Multi-tenant Restaurants
+    match /restaurants/{restaurantId} {
+      allow get: if isMemberOfRestaurant(restaurantId);
+      allow list: if isSignedIn();
+      allow create: if isSignedIn() && request.resource.data.ownerUid == request.auth.uid;
+      allow update: if isRestaurantManager(restaurantId) && request.resource.data.ownerUid == resource.data.ownerUid;
+      allow delete: if isRestaurantOwner(restaurantId);
+
+      // Staff subcollection
+      match /users/{userId} {
+        allow get, list: if isMemberOfRestaurant(restaurantId);
+        allow create: if isRestaurantManager(restaurantId);
+        allow update: if isRestaurantManager(restaurantId) || (
+          isUser(userId) &&
+          request.resource.data.role == resource.data.role &&
+          request.resource.data.restaurantId == resource.data.restaurantId &&
+          (!('ownerUid' in request.resource.data) || !('ownerUid' in resource.data) || request.resource.data.ownerUid == resource.data.ownerUid) &&
+          (!('permissions' in request.resource.data) || !('permissions' in resource.data) || request.resource.data.permissions == resource.data.permissions) &&
+          (!('accountStatus' in request.resource.data) || !('accountStatus' in resource.data) || request.resource.data.accountStatus == resource.data.accountStatus) &&
+          (!('status' in request.resource.data) || !('status' in resource.data) || request.resource.data.status == resource.data.status) &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'role', 'restaurantId', 'ownerUid', 'permissions', 'accountStatus', 'status'
+          ])
+        );
+        allow delete: if isRestaurantOwner(restaurantId);
+      }
+
+      // Departments
+      match /departments/{departmentId} {
+        allow get, list: if isMemberOfRestaurant(restaurantId);
+        allow create, update, delete: if isRestaurantManager(restaurantId);
+      }
+
+      // Items Master
+      match /items/{itemId} {
+        allow get, list: if isMemberOfRestaurant(restaurantId);
+        allow create, update, delete: if isStorekeeper(restaurantId);
+      }
+
+      // Vendors Master
+      match /vendors/{vendorId} {
+        allow get, list: if isMemberOfRestaurant(restaurantId);
+        allow create, update, delete: if isRestaurantManager(restaurantId);
+      }
+
+      // Purchases & Inward Goods
+      match /purchases/{purchaseId} {
+        allow get, list: if isMemberOfRestaurant(restaurantId);
+        allow create, update: if isStorekeeper(restaurantId);
+        allow delete: if isRestaurantOwner(restaurantId);
+      }
+
+      // Stock Transactions Ledger
+      match /stockTransactions/{transactionId} {
+        allow get, list: if isMemberOfRestaurant(restaurantId);
+        allow create: if isMemberOfRestaurant(restaurantId);
+        allow update, delete: if false; // Immutable ledger
+      }
+
+      // Issues to departments
+      match /issues/{issueId} {
+        allow get, list: if isMemberOfRestaurant(restaurantId);
+        allow create, update: if isStorekeeper(restaurantId);
+        allow delete: if isRestaurantOwner(restaurantId);
+      }
+
+      // Emergency Issues
+      match /emergencyIssues/{issueId} {
+        allow get, list: if isMemberOfRestaurant(restaurantId);
+        allow create: if isMemberOfRestaurant(restaurantId);
+        allow update, delete: if isRestaurantManager(restaurantId);
+      }
+
+      // Wastage records
+      match /wastage/{wastageId} {
+        allow get, list: if isMemberOfRestaurant(restaurantId);
+        allow create, update: if isStorekeeper(restaurantId);
+        allow delete: if isRestaurantOwner(restaurantId);
+      }
+
+      // Stock counts (physical audit & variance)
+      match /stockCounts/{countId} {
+        allow get, list: if isMemberOfRestaurant(restaurantId);
+        allow create, update: if isStorekeeper(restaurantId);
+        allow delete: if isRestaurantOwner(restaurantId);
+      }
+
+      // Vendor Payments
+      match /vendorPayments/{paymentId} {
+        allow get, list: if isMemberOfRestaurant(restaurantId);
+        allow create, update: if isRestaurantManager(restaurantId);
+        allow delete: if isRestaurantOwner(restaurantId);
+      }
+
+      // Purchase Orders
+      match /purchaseOrders/{poId} {
+        allow get, list: if isMemberOfRestaurant(restaurantId);
+        allow create, update: if isRestaurantManager(restaurantId);
+        allow delete: if isRestaurantOwner(restaurantId);
+      }
+
+      // Notifications
+      match /notifications/{notificationId} {
+        allow get, list: if isMemberOfRestaurant(restaurantId);
+        allow create, update: if isMemberOfRestaurant(restaurantId);
+        allow delete: if isRestaurantManager(restaurantId);
+      }
+
+      // Audit Logs
+      match /auditLogs/{logId} {
+        allow get, list: if isRestaurantManager(restaurantId);
+        allow create: if isMemberOfRestaurant(restaurantId);
+        allow update, delete: if false; // Immutable audit trail
+      }
+
+      // Subscriptions
+      match /subscriptions/{subscriptionId} {
+        allow get, list: if isRestaurantManager(restaurantId);
+        allow create, update: if isRestaurantOwner(restaurantId);
+        allow delete: if isRestaurantOwner(restaurantId);
+      }
+
+      // Settings (e.g. POS integration configuration)
+      match /settings/{settingId} {
+        allow get, list: if isMemberOfRestaurant(restaurantId);
+        allow create, update, delete: if isRestaurantManager(restaurantId);
+      }
+
+      // Recipe BOMs for POS reconciliation
+      match /recipes/{recipeId} {
+        allow get, list: if isMemberOfRestaurant(restaurantId);
+        allow create, update, delete: if isRestaurantManager(restaurantId);
+      }
+
+      // POS Sales Records
+      match /posSales/{saleId} {
+        allow get, list: if isMemberOfRestaurant(restaurantId);
+        allow create, update: if isRestaurantManager(restaurantId);
+        allow delete: if isRestaurantOwner(restaurantId);
+      }
+    }
+  }
+}
