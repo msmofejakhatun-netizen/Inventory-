@@ -101,8 +101,10 @@ export interface PurchaseItemRow {
   unit: string;
   quantity: number;
   rate: number;
+  purchaseRate?: number;
   taxPercent: number;
   total: number;
+  amount?: number;
   previousRate: number;
   priceHikeAbsolute: number;
   priceHikePercent: number;
@@ -111,6 +113,8 @@ export interface PurchaseItemRow {
   targetStockDays: number;
   isAboveTarget: boolean;
 }
+
+export type PurchasePaymentStatus = 'UNPAID' | 'PARTIALLY_PAID' | 'PAID' | 'unpaid' | 'partially_paid' | 'paid';
 
 export interface Purchase {
   id: string;
@@ -121,15 +125,22 @@ export interface Purchase {
   totalAmount: number;
   taxAmount: number;
   netAmount: number;
-  paymentStatus: 'unpaid' | 'partially_paid' | 'paid';
+  paidAmount?: number;
+  remainingAmount?: number;
+  paymentStatus: PurchasePaymentStatus;
   isOverride: boolean;
   overrideReason?: string;
   itemsCount: number;
   items: PurchaseItemRow[];
+  poId?: string;
+  poNumber?: string;
+  invoiceImageUrl?: string;
+  invoiceImagePath?: string;
   recordedByUid: string;
   recordedByName: string;
   restaurantId: string;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export type StockTransactionType =
@@ -151,6 +162,8 @@ export interface StockTransaction {
   departmentName?: string;
   staffUid?: string;
   staffName?: string;
+  actorUid?: string;
+  actorName?: string;
   reason?: string;
   referenceId?: string;
   restaurantId: string;
@@ -252,24 +265,44 @@ export interface VendorPayment {
   id: string;
   vendorId: string;
   vendorName: string;
+  purchaseId?: string;
   billNumber?: string;
   amount: number;
   paymentMode: PaymentMode;
+  paymentDate?: string;
   reference?: string;
+  notes?: string;
   recordedByUid: string;
   recordedByName: string;
   restaurantId: string;
   createdAt: string;
+  updatedAt?: string;
 }
+
+export type PurchaseOrderStatus =
+  | 'DRAFT'
+  | 'PENDING_SEND'
+  | 'SENT'
+  | 'RECEIVED'
+  | 'PARTIALLY_RECEIVED'
+  | 'CANCELLED'
+  | 'FULFILLED';
 
 export interface PurchaseOrderItem {
   itemId: string;
   itemName: string;
   unit: string;
-  recommendedQuantity: number;
+  orderedQty: number;
+  recommendedQuantity?: number; // legacy support
   estimatedRate: number;
   estimatedAmount: number;
-  reason: string;
+  reason?: string;
+  receivedQty?: number;
+  missingQty?: number;
+  actualRate?: number;
+  actualAmount?: number;
+  previouslyReceivedQty?: number;
+  itemStatus?: 'RECEIVED' | 'PARTIALLY_RECEIVED' | 'MISSING';
 }
 
 export interface PurchaseOrder {
@@ -277,11 +310,31 @@ export interface PurchaseOrder {
   poNumber: string;
   vendorId: string;
   vendorName: string;
-  status: 'DRAFT' | 'SENT' | 'PARTIALLY_RECEIVED' | 'FULFILLED' | 'CANCELLED';
-  totalEstimatedAmount: number;
+  vendorPhone?: string;
+  status: PurchaseOrderStatus;
   items: PurchaseOrderItem[];
+  totalEstimatedAmount?: number; // legacy support
+  estimatedTotal: number;
+  actualReceivedTotal?: number;
+  sentAt?: string;
+  sentByUid?: string;
+  sentByName?: string;
+  receivedAt?: string;
+  receivedByUid?: string;
+  receivedByName?: string;
+  whatsappMessageId?: string;
+  whatsappSessionInfo?: string;
+  purchaseId?: string;
+  invoiceId?: string;
+  billNumber?: string;
+  invoiceImageUrl?: string;
+  invoiceImagePath?: string;
+  invoiceTotal?: number;
+  calculatedInvoiceTotal?: number;
+  totalDifference?: number;
   restaurantId: string;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface NotificationItem {

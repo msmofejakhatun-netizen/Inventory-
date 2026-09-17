@@ -232,7 +232,7 @@ export async function executePurchaseTransaction(
     totalAmount: number;
     taxAmount: number;
     netAmount: number;
-    paymentStatus: 'unpaid' | 'partially_paid' | 'paid';
+    paymentStatus: 'unpaid' | 'partially_paid' | 'paid' | 'UNPAID' | 'PARTIALLY_PAID' | 'PAID';
     isOverride: boolean;
     overrideReason?: string;
     items: PurchaseItemRow[];
@@ -342,13 +342,23 @@ export async function executePurchaseTransaction(
       }
 
       // 4. Update Vendor Balances
+      const isPaid = purchaseData.paymentStatus === 'paid' || purchaseData.paymentStatus === 'PAID';
+      const initialPaidAmount = isPaid ? purchaseData.netAmount : 0;
+      const initialRemainingAmount = isPaid ? 0 : purchaseData.netAmount;
+      const initialStatus: 'UNPAID' | 'PAID' = isPaid ? 'PAID' : 'UNPAID';
+
       const newVendorPurchases = Number(((vendorData.totalPurchases || 0) + purchaseData.netAmount).toFixed(2));
-      const additionalDue = purchaseData.paymentStatus === 'paid' ? 0 : purchaseData.netAmount;
+      const additionalDue = isPaid ? 0 : purchaseData.netAmount;
       const newCurrentDue = Number(((vendorData.currentDue || 0) + additionalDue).toFixed(2));
+      const newTotalPaid = isPaid
+        ? Number(((vendorData.totalPaid || 0) + purchaseData.netAmount).toFixed(2))
+        : (vendorData.totalPaid || 0);
 
       transaction.update(vendorRef, {
         totalPurchases: newVendorPurchases,
+        totalPaid: newTotalPaid,
         currentDue: newCurrentDue,
+        updatedAt: now,
       });
 
       // 5. Create Purchase Doc
@@ -361,7 +371,9 @@ export async function executePurchaseTransaction(
         totalAmount: purchaseData.totalAmount,
         taxAmount: purchaseData.taxAmount,
         netAmount: purchaseData.netAmount,
-        paymentStatus: purchaseData.paymentStatus,
+        paidAmount: initialPaidAmount,
+        remainingAmount: initialRemainingAmount,
+        paymentStatus: initialStatus,
         isOverride: purchaseData.isOverride,
         overrideReason: purchaseData.overrideReason || '',
         itemsCount: purchaseData.items.length,
@@ -370,6 +382,7 @@ export async function executePurchaseTransaction(
         recordedByName: purchaseData.recordedByName,
         restaurantId,
         createdAt: now,
+        updatedAt: now,
       };
       transaction.set(purchaseRef, finalPurchase);
 
@@ -877,20 +890,30 @@ export async function executeVendorPaymentTransaction(
   paymentData: {
     vendorId: string;
     vendorName: string;
+    purchaseId?: string;
     billNumber?: string;
     amount: number;
     paymentMode: VendorPayment['paymentMode'];
+    paymentDate?: string;
     reference?: string;
+    notes?: string;
     recordedByUid: string;
     recordedByName: string;
   }
 ): Promise<string> {
+  const amountToPay = Number(paymentData.amount);
+  if (!amountToPay || amountToPay <= 0) {
+    throw new Error('Payment amount must be greater than zero.');
+  }
+
   const payRef = doc(getTenantCol(restaurantId, 'vendorPayments'));
   const paymentId = payRef.id;
   const now = new Date().toISOString();
+  const paymentDate = paymentData.paymentDate || now.slice(0, 10);
 
   try {
     await runTransaction(db, async (transaction) => {
+      // 1. Read vendor
       const vendorRef = getTenantDoc(restaurantId, 'vendors', paymentData.vendorId);
       const vendorSnap = await transaction.get(vendorRef);
       if (!vendorSnap.exists()) {
@@ -898,29 +921,96 @@ export async function executeVendorPaymentTransaction(
       }
       const vendor = vendorSnap.data() as Vendor;
 
-      const newPaid = Number(((vendor.totalPaid || 0) + paymentData.amount).toFixed(2));
-      const newDue = Number(((vendor.currentDue || 0) - paymentData.amount).toFixed(2));
+      // 2. Read selected purchase/invoice if payment is invoice-specific
+      let purchaseRef: ReturnType<typeof getTenantDoc> | null = null;
+      let purchaseData: Purchase | null = null;
+      let newPaidAmount = 0;
+      let newRemainingAmount = 0;
+      let newPurchasePaymentStatus: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID' = 'UNPAID';
+
+      if (paymentData.purchaseId) {
+        purchaseRef = getTenantDoc(restaurantId, 'purchases', paymentData.purchaseId);
+        const purchaseSnap = await transaction.get(purchaseRef);
+        if (!purchaseSnap.exists()) {
+          throw new Error('Purchase invoice not found');
+        }
+        purchaseData = purchaseSnap.data() as Purchase;
+
+        if (purchaseData.vendorId !== paymentData.vendorId) {
+          throw new Error('Selected purchase invoice does not belong to this vendor');
+        }
+
+        const netAmount = Number(purchaseData.netAmount) || 0;
+        let currentPaid = 0;
+        if (purchaseData.paidAmount !== undefined) {
+          currentPaid = Number(purchaseData.paidAmount) || 0;
+        } else if (purchaseData.paymentStatus === 'paid' || purchaseData.paymentStatus === 'PAID') {
+          currentPaid = netAmount;
+        }
+
+        const currentRemaining =
+          purchaseData.remainingAmount !== undefined
+            ? Number(purchaseData.remainingAmount)
+            : Math.max(0, netAmount - currentPaid);
+
+        // Validate payment does not exceed applicable invoice outstanding
+        if (amountToPay > currentRemaining + 0.01) {
+          throw new Error(
+            `Payment amount ₹${amountToPay.toFixed(2)} exceeds invoice remaining balance of ₹${currentRemaining.toFixed(2)}.`
+          );
+        }
+
+        newPaidAmount = Number((currentPaid + amountToPay).toFixed(2));
+        newRemainingAmount = Number(Math.max(0, netAmount - newPaidAmount).toFixed(2));
+
+        if (newRemainingAmount <= 0.01) {
+          newPurchasePaymentStatus = 'PAID';
+        } else if (newPaidAmount > 0) {
+          newPurchasePaymentStatus = 'PARTIALLY_PAID';
+        } else {
+          newPurchasePaymentStatus = 'UNPAID';
+        }
+
+        transaction.update(purchaseRef, {
+          paidAmount: newPaidAmount,
+          remainingAmount: newRemainingAmount,
+          paymentStatus: newPurchasePaymentStatus,
+          updatedAt: now,
+        });
+      }
+
+      // 5. Update vendor balances
+      const newPaid = Number(((vendor.totalPaid || 0) + amountToPay).toFixed(2));
+      const newDue = Number(((vendor.currentDue || 0) - amountToPay).toFixed(2));
 
       transaction.update(vendorRef, {
         totalPaid: newPaid,
         currentDue: newDue,
+        updatedAt: now,
       });
 
+      // 7. Create Vendor Payment Ledger Doc
+      const resolvedBill = paymentData.billNumber || purchaseData?.billNumber || '';
       const payDoc: VendorPayment = {
         id: paymentId,
         vendorId: paymentData.vendorId,
-        vendorName: paymentData.vendorName,
-        billNumber: paymentData.billNumber || '',
-        amount: paymentData.amount,
+        vendorName: paymentData.vendorName || vendor.name,
+        purchaseId: paymentData.purchaseId || '',
+        billNumber: resolvedBill,
+        amount: amountToPay,
         paymentMode: paymentData.paymentMode,
+        paymentDate,
         reference: paymentData.reference || '',
+        notes: paymentData.notes || '',
         recordedByUid: paymentData.recordedByUid,
         recordedByName: paymentData.recordedByName,
         restaurantId,
         createdAt: now,
+        updatedAt: now,
       };
       transaction.set(payRef, payDoc);
 
+      // 11. Create Audit Log
       const auditRef = doc(getTenantCol(restaurantId, 'auditLogs'));
       const audit: AuditLog = {
         id: auditRef.id,
@@ -929,7 +1019,13 @@ export async function executeVendorPaymentTransaction(
         action: 'VENDOR_PAYMENT_RECORDED',
         entity: 'VendorPayment',
         entityId: paymentId,
-        details: `Disbursed ₹${paymentData.amount} to ${paymentData.vendorName} via ${paymentData.paymentMode} (Ref: ${paymentData.reference || 'N/A'}). Remaining Due: ₹${newDue}`,
+        details: `Disbursed ₹${amountToPay.toFixed(2)} to ${vendor.name} via ${paymentData.paymentMode} (Ref: ${
+          paymentData.reference || 'N/A'
+        })${
+          resolvedBill
+            ? ` against Bill #${resolvedBill} [Invoice Status: ${purchaseData ? newPurchasePaymentStatus : 'N/A'}]`
+            : ''
+        }. Vendor remaining due: ₹${newDue.toFixed(2)}`,
         restaurantId,
         createdAt: now,
       };
@@ -939,5 +1035,641 @@ export async function executeVendorPaymentTransaction(
     return paymentId;
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, `restaurants/${restaurantId}/vendorPayments`);
+    throw err;
   }
 }
+
+/**
+ * Reconcile existing unlinked payment with an invoice
+ */
+export async function reconcilePaymentWithPurchase(
+  restaurantId: string,
+  params: {
+    paymentId: string;
+    purchaseId: string;
+    recordedByUid: string;
+    recordedByName: string;
+  }
+): Promise<void> {
+  const now = new Date().toISOString();
+  try {
+    await runTransaction(db, async (transaction) => {
+      // 1. Read payment
+      const payRef = getTenantDoc(restaurantId, 'vendorPayments', params.paymentId);
+      const paySnap = await transaction.get(payRef);
+      if (!paySnap.exists()) {
+        throw new Error('Payment record not found');
+      }
+      const payment = paySnap.data() as VendorPayment;
+
+      // 2. Read purchase
+      const purchaseRef = getTenantDoc(restaurantId, 'purchases', params.purchaseId);
+      const purchaseSnap = await transaction.get(purchaseRef);
+      if (!purchaseSnap.exists()) {
+        throw new Error('Purchase invoice not found');
+      }
+      const purchase = purchaseSnap.data() as Purchase;
+
+      if (payment.vendorId !== purchase.vendorId) {
+        throw new Error('Vendor mismatch: Payment and Invoice belong to different vendors.');
+      }
+
+      if (payment.purchaseId && payment.purchaseId === purchase.id) {
+        throw new Error('This payment is already linked to this invoice.');
+      }
+
+      const netAmount = Number(purchase.netAmount) || 0;
+      let currentPaid = 0;
+      if (purchase.paidAmount !== undefined) {
+        currentPaid = Number(purchase.paidAmount) || 0;
+      } else if (purchase.paymentStatus === 'paid' || purchase.paymentStatus === 'PAID') {
+        currentPaid = netAmount;
+      }
+
+      const currentRemaining =
+        purchase.remainingAmount !== undefined
+          ? Number(purchase.remainingAmount)
+          : Math.max(0, netAmount - currentPaid);
+
+      if (payment.amount > currentRemaining + 0.01) {
+        throw new Error(
+          `Payment voucher amount (₹${payment.amount.toFixed(2)}) exceeds invoice remaining balance (₹${currentRemaining.toFixed(2)}).`
+        );
+      }
+
+      const newPaidAmount = Number((currentPaid + payment.amount).toFixed(2));
+      const newRemainingAmount = Number(Math.max(0, netAmount - newPaidAmount).toFixed(2));
+      const newStatus: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID' =
+        newRemainingAmount <= 0.01 ? 'PAID' : newPaidAmount > 0 ? 'PARTIALLY_PAID' : 'UNPAID';
+
+      // Update purchase
+      transaction.update(purchaseRef, {
+        paidAmount: newPaidAmount,
+        remainingAmount: newRemainingAmount,
+        paymentStatus: newStatus,
+        updatedAt: now,
+      });
+
+      // Update payment record with purchaseId and billNumber
+      transaction.update(payRef, {
+        purchaseId: purchase.id,
+        billNumber: purchase.billNumber,
+        updatedAt: now,
+      });
+
+      // Audit Log
+      const auditRef = doc(getTenantCol(restaurantId, 'auditLogs'));
+      const audit: AuditLog = {
+        id: auditRef.id,
+        actorUid: params.recordedByUid,
+        actorName: params.recordedByName,
+        action: 'PAYMENT_RECONCILED_WITH_INVOICE',
+        entity: 'Purchase',
+        entityId: purchase.id,
+        details: `Reconciled existing payment voucher ${payment.id} (₹${payment.amount.toFixed(2)}) with Bill #${
+          purchase.billNumber
+        }. New invoice status: ${newStatus}.`,
+        restaurantId,
+        createdAt: now,
+      };
+      transaction.set(auditRef, audit);
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, `restaurants/${restaurantId}/purchases`);
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PURCHASE ORDER (PO) LIFECYCLE WORKFLOW
+// ---------------------------------------------------------------------------
+
+export async function updateVendorContact(
+  restaurantId: string,
+  vendorId: string,
+  phone: string,
+  actorUid?: string,
+  actorName?: string
+): Promise<void> {
+  try {
+    const vendorRef = getTenantDoc(restaurantId, 'vendors', vendorId);
+    await updateDoc(vendorRef, {
+      phone,
+      mobile: phone,
+      updatedAt: new Date().toISOString(),
+    });
+    if (actorUid && actorName) {
+      await logAuditEvent(
+        restaurantId,
+        actorUid,
+        actorName,
+        'VENDOR_CONTACT_UPDATED',
+        'Vendor',
+        vendorId,
+        `Updated vendor contact number to ${phone}`
+      );
+    }
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `restaurants/${restaurantId}/vendors/${vendorId}`);
+    throw err;
+  }
+}
+
+export async function createPurchaseOrder(
+  restaurantId: string,
+  poData: {
+    vendorId: string;
+    vendorName: string;
+    vendorPhone?: string;
+    items: {
+      itemId: string;
+      itemName: string;
+      unit: string;
+      orderedQty: number;
+      estimatedRate: number;
+      estimatedAmount: number;
+      reason?: string;
+    }[];
+    actorUid: string;
+    actorName: string;
+  }
+): Promise<string> {
+  const poRef = doc(getTenantCol(restaurantId, 'purchaseOrders'));
+  const now = new Date().toISOString();
+  const totalEstimated = poData.items.reduce((sum, item) => sum + item.estimatedAmount, 0);
+
+  const po: PurchaseOrder = {
+    id: poRef.id,
+    poNumber: `PO-${Date.now().toString().slice(-6)}`,
+    vendorId: poData.vendorId,
+    vendorName: poData.vendorName,
+    vendorPhone: poData.vendorPhone || '',
+    status: 'DRAFT',
+    items: poData.items.map((i) => ({
+      itemId: i.itemId,
+      itemName: i.itemName,
+      unit: i.unit,
+      orderedQty: i.orderedQty,
+      recommendedQuantity: i.orderedQty,
+      estimatedRate: i.estimatedRate,
+      estimatedAmount: i.estimatedAmount,
+      reason: i.reason || 'Store replenishment',
+      receivedQty: 0,
+      missingQty: i.orderedQty,
+      previouslyReceivedQty: 0,
+      itemStatus: 'MISSING',
+    })),
+    totalEstimatedAmount: totalEstimated,
+    estimatedTotal: totalEstimated,
+    actualReceivedTotal: 0,
+    restaurantId,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  try {
+    await setDoc(poRef, po);
+    await logAuditEvent(
+      restaurantId,
+      poData.actorUid,
+      poData.actorName,
+      'PURCHASE_ORDER_CREATED',
+      'PurchaseOrder',
+      poRef.id,
+      `Created Purchase Order ${po.poNumber} for vendor ${po.vendorName} (${po.items.length} items, total ₹${totalEstimated.toFixed(2)})`
+    );
+    return poRef.id;
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, `restaurants/${restaurantId}/purchaseOrders`);
+    throw err;
+  }
+}
+
+export async function updatePurchaseOrderStatus(
+  restaurantId: string,
+  poId: string,
+  status: import('../types').PurchaseOrderStatus,
+  actorUid: string,
+  actorName: string,
+  extraData?: {
+    sentAt?: string;
+    whatsappSessionInfo?: string;
+    cancelReason?: string;
+  }
+): Promise<void> {
+  try {
+    const poRef = getTenantDoc(restaurantId, 'purchaseOrders', poId);
+    const now = new Date().toISOString();
+    const updates: Partial<PurchaseOrder> & Record<string, any> = {
+      status,
+      updatedAt: now,
+    };
+
+    if (status === 'SENT') {
+      updates.sentAt = extraData?.sentAt || now;
+      updates.sentByUid = actorUid;
+      updates.sentByName = actorName;
+      if (extraData?.whatsappSessionInfo) {
+        updates.whatsappSessionInfo = extraData.whatsappSessionInfo;
+      }
+    }
+
+    await updateDoc(poRef, updates);
+
+    let auditAction = 'PURCHASE_ORDER_STATUS_UPDATED';
+    if (status === 'SENT') auditAction = 'PURCHASE_ORDER_SENT';
+    if (status === 'PENDING_SEND') auditAction = 'PURCHASE_ORDER_PENDING_SEND';
+    if (status === 'CANCELLED') auditAction = 'PURCHASE_ORDER_CANCELLED';
+
+    await logAuditEvent(
+      restaurantId,
+      actorUid,
+      actorName,
+      auditAction,
+      'PurchaseOrder',
+      poId,
+      `Purchase Order status updated to ${status}${extraData?.cancelReason ? ` (${extraData.cancelReason})` : ''}`
+    );
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `restaurants/${restaurantId}/purchaseOrders/${poId}`);
+    throw err;
+  }
+}
+
+export interface ReceiveOrderLineItem {
+  itemId: string;
+  itemName: string;
+  unit: string;
+  orderedQty: number;
+  newlyReceivedQty: number; // strictly what is arriving now
+  actualRate: number;       // vendor invoice rate
+  estimatedRate: number;    // original PO estimate
+  estimatedAmount: number;
+  itemStatus: 'RECEIVED' | 'PARTIALLY_RECEIVED' | 'MISSING';
+}
+
+export interface ReceiveOrderTransactionParams {
+  restaurantId: string;
+  poId: string;
+  billNumber: string;
+  billDate: string;
+  vendorInvoiceTotal: number;
+  isOverride: boolean;
+  overrideReason?: string;
+  invoiceImageUrl?: string;
+  invoiceImagePath?: string;
+  items: ReceiveOrderLineItem[];
+  recordedByUid: string;
+  recordedByName: string;
+  priceHikeThresholdPercent?: number;
+}
+
+export async function receivePurchaseOrderTransaction(
+  params: ReceiveOrderTransactionParams
+): Promise<{ purchaseId: string; poStatus: import('../types').PurchaseOrderStatus }> {
+  const {
+    restaurantId,
+    poId,
+    billNumber,
+    billDate,
+    vendorInvoiceTotal,
+    isOverride,
+    overrideReason,
+    invoiceImageUrl,
+    invoiceImagePath,
+    items,
+    recordedByUid,
+    recordedByName,
+    priceHikeThresholdPercent = 2.0,
+  } = params;
+
+  try {
+    return await runTransaction(db, async (transaction) => {
+      const now = new Date().toISOString();
+      const poRef = getTenantDoc(restaurantId, 'purchaseOrders', poId);
+      const poSnap = await transaction.get(poRef);
+
+      if (!poSnap.exists()) {
+        throw new Error(`Purchase Order ${poId} not found.`);
+      }
+
+      const poData = poSnap.data() as PurchaseOrder;
+
+      if (poData.status === 'RECEIVED') {
+        throw new Error(`Purchase Order ${poData.poNumber} has already been fully received.`);
+      }
+      if (poData.status === 'CANCELLED') {
+        throw new Error(`Purchase Order ${poData.poNumber} was cancelled and cannot be received.`);
+      }
+
+      // Read vendor
+      const vendorRef = getTenantDoc(restaurantId, 'vendors', poData.vendorId);
+      const vendorSnap = await transaction.get(vendorRef);
+      if (!vendorSnap.exists()) {
+        throw new Error(`Vendor ${poData.vendorId} not found.`);
+      }
+      const vendorData = vendorSnap.data() as Vendor;
+
+      // Filter line items with newly received quantity > 0
+      const receivedItems = items.filter((i) => i.newlyReceivedQty > 0);
+      if (receivedItems.length === 0) {
+        throw new Error('Please specify a received quantity greater than 0 for at least one item.');
+      }
+
+      // Read all corresponding item documents
+      const itemSnaps: { itemDoc: Item; itemRef: any; input: ReceiveOrderLineItem }[] = [];
+      for (const row of receivedItems) {
+        const itemRef = getTenantDoc(restaurantId, 'items', row.itemId);
+        const itemSnap = await transaction.get(itemRef);
+        if (!itemSnap.exists()) {
+          throw new Error(`Item ${row.itemName} (${row.itemId}) not found in database.`);
+        }
+        itemSnaps.push({
+          itemDoc: itemSnap.data() as Item,
+          itemRef,
+          input: row,
+        });
+      }
+
+      // Calculate calculated invoice total
+      let calculatedInvoiceTotal = 0;
+      const purchaseItemRows: PurchaseItemRow[] = [];
+      const priceHikesDetected: { name: string; oldRate: number; newRate: number; pct: number }[] = [];
+
+      for (const { itemDoc, itemRef, input } of itemSnaps) {
+        const lineTotal = Number((input.newlyReceivedQty * input.actualRate).toFixed(2));
+        calculatedInvoiceTotal = Number((calculatedInvoiceTotal + lineTotal).toFixed(2));
+
+        const prevRate = itemDoc.lastPurchaseRate || itemDoc.averageStockRate || input.estimatedRate;
+        const hikeAbs = Math.max(0, input.actualRate - prevRate);
+        const hikePct = prevRate > 0 ? (hikeAbs / prevRate) * 100 : 0;
+        const isHike = hikePct >= priceHikeThresholdPercent;
+
+        purchaseItemRows.push({
+          itemId: input.itemId,
+          itemName: input.itemName,
+          category: itemDoc.category || 'General',
+          unit: input.unit,
+          quantity: input.newlyReceivedQty,
+          rate: input.actualRate,
+          purchaseRate: input.actualRate,
+          taxPercent: itemDoc.taxPercent || 0,
+          total: lineTotal,
+          amount: lineTotal,
+          previousRate: prevRate,
+          priceHikeAbsolute: Number(hikeAbs.toFixed(2)),
+          priceHikePercent: Number(hikePct.toFixed(2)),
+          isPriceHike: isHike,
+          currentStock: itemDoc.currentStock || 0,
+          targetStockDays: itemDoc.targetStockDays || 15,
+          isAboveTarget: (itemDoc.currentStock || 0) + input.newlyReceivedQty > (itemDoc.maximumStock || 9999),
+        });
+
+        // Price hike check
+        const baselineRate = itemDoc.lastPurchaseRate || input.estimatedRate;
+        if (baselineRate > 0 && input.actualRate > baselineRate) {
+          const hikePct = ((input.actualRate - baselineRate) / baselineRate) * 100;
+          if (hikePct >= priceHikeThresholdPercent) {
+            priceHikesDetected.push({
+              name: input.itemName,
+              oldRate: baselineRate,
+              newRate: input.actualRate,
+              pct: Number(hikePct.toFixed(2)),
+            });
+          }
+        }
+
+        // Recalculate WAC strictly using the actual purchase rate
+        const currentStock = itemDoc.currentStock || 0;
+        const currentRate = itemDoc.averageStockRate || itemDoc.lastPurchaseRate || input.actualRate;
+        const newAverageStockRate = calculateWeightedAverageCost(
+          currentStock,
+          currentRate,
+          input.newlyReceivedQty,
+          input.actualRate
+        );
+        const newStock = Number((currentStock + input.newlyReceivedQty).toFixed(2));
+
+        // Update item in inventory
+        transaction.update(itemRef, {
+          currentStock: newStock,
+          averageStockRate: newAverageStockRate,
+          lastPurchaseRate: input.actualRate,
+          updatedAt: now,
+        });
+      }
+
+      // Total difference check
+      const totalDifference = Number(Math.abs(calculatedInvoiceTotal - vendorInvoiceTotal).toFixed(2));
+
+      // Generate Purchase ID
+      const purchaseRef = doc(getTenantCol(restaurantId, 'purchases'));
+      const purchaseId = purchaseRef.id;
+
+      // Stock transaction entries
+      for (const { itemDoc, input } of itemSnaps) {
+        const stockTxRef = doc(getTenantCol(restaurantId, 'stockTransactions'));
+        const stockTx: StockTransaction = {
+          id: stockTxRef.id,
+          itemId: input.itemId,
+          itemName: input.itemName,
+          type: 'PURCHASE_RECEIVE',
+          quantity: input.newlyReceivedQty,
+          rate: input.actualRate,
+          value: Number((input.newlyReceivedQty * input.actualRate).toFixed(2)),
+          referenceId: purchaseId,
+          reason: `PO ${poData.poNumber} Receive (Bill #${billNumber})`,
+          restaurantId,
+          createdAt: now,
+          actorUid: recordedByUid,
+          actorName: recordedByName,
+        };
+        transaction.set(stockTxRef, stockTx);
+      }
+
+      // Update Vendor Due & Total Purchases
+      const currentVendorPurchases = vendorData.totalPurchases || 0;
+      const currentVendorDue = vendorData.currentDue || 0;
+      transaction.update(vendorRef, {
+        totalPurchases: Number((currentVendorPurchases + calculatedInvoiceTotal).toFixed(2)),
+        currentDue: Number((currentVendorDue + calculatedInvoiceTotal).toFixed(2)),
+        updatedAt: now,
+      });
+
+      // Create Purchase Record
+      const purchaseRecord: Purchase = {
+        id: purchaseId,
+        billNumber,
+        billDate,
+        vendorId: poData.vendorId,
+        vendorName: poData.vendorName,
+        totalAmount: calculatedInvoiceTotal,
+        taxAmount: 0,
+        netAmount: calculatedInvoiceTotal,
+        paidAmount: 0,
+        remainingAmount: calculatedInvoiceTotal,
+        paymentStatus: 'UNPAID',
+        isOverride: Boolean(isOverride || priceHikesDetected.length > 0 || totalDifference > 0.01),
+        overrideReason:
+          overrideReason ||
+          (priceHikesDetected.length > 0
+            ? `Price hike verified on ${priceHikesDetected.map((h) => h.name).join(', ')}`
+            : totalDifference > 0.01
+            ? `Invoice amount difference ₹${totalDifference.toFixed(2)} accepted`
+            : 'Standard receipt'),
+        itemsCount: purchaseItemRows.length,
+        items: purchaseItemRows,
+        poId: poData.id,
+        poNumber: poData.poNumber,
+        invoiceImageUrl: invoiceImageUrl || '',
+        invoiceImagePath: invoiceImagePath || '',
+        recordedByUid,
+        recordedByName,
+        restaurantId,
+        createdAt: now,
+        updatedAt: now,
+      };
+      transaction.set(purchaseRef, purchaseRecord);
+
+      // Compute updated PO items and overall status
+      const existingPoItems = poData.items || [];
+      let totalOrderedAll = 0;
+      let totalReceivedAll = 0;
+
+      const updatedPoItems = existingPoItems.map((original) => {
+        const matched = items.find((i) => i.itemId === original.itemId);
+        const ordered = original.orderedQty || original.recommendedQuantity || 0;
+        const prevReceived = original.previouslyReceivedQty || original.receivedQty || 0;
+        const newlyReceived = matched?.newlyReceivedQty || 0;
+        const totalReceived = Number((prevReceived + newlyReceived).toFixed(2));
+        const missing = Number(Math.max(0, ordered - totalReceived).toFixed(2));
+        const actualRate = matched?.actualRate ?? original.actualRate ?? original.estimatedRate;
+        const actualAmount = Number((totalReceived * actualRate).toFixed(2));
+
+        totalOrderedAll += ordered;
+        totalReceivedAll += totalReceived;
+
+        const itemStatus: 'RECEIVED' | 'PARTIALLY_RECEIVED' | 'MISSING' =
+          totalReceived >= ordered
+            ? 'RECEIVED'
+            : totalReceived > 0
+            ? 'PARTIALLY_RECEIVED'
+            : 'MISSING';
+
+        return {
+          ...original,
+          orderedQty: ordered,
+          recommendedQuantity: ordered,
+          receivedQty: totalReceived,
+          missingQty: missing,
+          previouslyReceivedQty: totalReceived,
+          actualRate,
+          actualAmount,
+          itemStatus,
+        };
+      });
+
+      const poStatus: import('../types').PurchaseOrderStatus =
+        totalReceivedAll >= totalOrderedAll && totalOrderedAll > 0
+          ? 'RECEIVED'
+          : totalReceivedAll > 0
+          ? 'PARTIALLY_RECEIVED'
+          : poData.status;
+
+      // Update PO
+      const poUpdates: Partial<PurchaseOrder> & Record<string, any> = {
+        status: poStatus,
+        items: updatedPoItems,
+        purchaseId,
+        invoiceId: billNumber,
+        billNumber,
+        receivedAt: now,
+        receivedByUid: recordedByUid,
+        receivedByName: recordedByName,
+        actualReceivedTotal: Number(((poData.actualReceivedTotal || 0) + calculatedInvoiceTotal).toFixed(2)),
+        invoiceTotal: vendorInvoiceTotal,
+        calculatedInvoiceTotal,
+        totalDifference,
+        updatedAt: now,
+      };
+
+      if (invoiceImageUrl) poUpdates.invoiceImageUrl = invoiceImageUrl;
+      if (invoiceImagePath) poUpdates.invoiceImagePath = invoiceImagePath;
+
+      transaction.update(poRef, poUpdates);
+
+      // Record Audit Logs
+      const auditRef1 = doc(getTenantCol(restaurantId, 'auditLogs'));
+      const auditLog1: AuditLog = {
+        id: auditRef1.id,
+        actorUid: recordedByUid,
+        actorName: recordedByName,
+        action: poStatus === 'RECEIVED' ? 'PURCHASE_ORDER_RECEIVED' : 'PURCHASE_ORDER_PARTIALLY_RECEIVED',
+        entity: 'PurchaseOrder',
+        entityId: poData.id,
+        details: `Received inward delivery for ${poData.poNumber} (Bill #${billNumber}, ₹${calculatedInvoiceTotal.toFixed(
+          2
+        )}). Status: ${poStatus}.`,
+        restaurantId,
+        createdAt: now,
+      };
+      transaction.set(auditRef1, auditLog1);
+
+      const auditRef2 = doc(getTenantCol(restaurantId, 'auditLogs'));
+      const auditLog2: AuditLog = {
+        id: auditRef2.id,
+        actorUid: recordedByUid,
+        actorName: recordedByName,
+        action: 'INVOICE_VERIFIED',
+        entity: 'Purchase',
+        entityId: purchaseId,
+        details: `Verified Invoice Bill #${billNumber} for Vendor ${poData.vendorName}. Total: ₹${calculatedInvoiceTotal.toFixed(
+          2
+        )} (Difference: ₹${totalDifference.toFixed(2)}).`,
+        restaurantId,
+        createdAt: now,
+      };
+      transaction.set(auditRef2, auditLog2);
+
+      if (isOverride || priceHikesDetected.length > 0) {
+        const auditRef3 = doc(getTenantCol(restaurantId, 'auditLogs'));
+        const auditLog3: AuditLog = {
+          id: auditRef3.id,
+          actorUid: recordedByUid,
+          actorName: recordedByName,
+          action: 'INVOICE_PRICE_OVERRIDE',
+          entity: 'Purchase',
+          entityId: purchaseId,
+          details: `Invoice price override applied: ${overrideReason || 'Price hike / mismatch confirmed'}`,
+          restaurantId,
+          createdAt: now,
+        };
+        transaction.set(auditRef3, auditLog3);
+      }
+
+      // Notifications for price hike
+      if (priceHikesDetected.length > 0) {
+        const notifRef = doc(getTenantCol(restaurantId, 'notifications'));
+        const notification: NotificationItem = {
+          id: notifRef.id,
+          title: `Price Hike Alert: PO ${poData.poNumber}`,
+          message: `${priceHikesDetected
+            .map((h) => `${h.name} up +${h.pct}% (₹${h.oldRate} → ₹${h.newRate})`)
+            .join('; ')} on Bill #${billNumber} from ${poData.vendorName}.`,
+          type: 'PRICE_HIKE',
+          severity: 'warning',
+          isRead: false,
+          restaurantId,
+          createdAt: now,
+        };
+        transaction.set(notifRef, notification);
+      }
+
+      return { purchaseId, poStatus };
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, `restaurants/${restaurantId}/purchaseOrders/${poId}`);
+    throw err;
+  }
+}
+

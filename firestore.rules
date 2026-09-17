@@ -186,7 +186,7 @@ service cloud.firestore {
       // Purchase Orders
       match /purchaseOrders/{poId} {
         allow get, list: if isMemberOfRestaurant(restaurantId);
-        allow create, update: if isRestaurantManager(restaurantId);
+        allow create, update: if isStorekeeper(restaurantId);
         allow delete: if isRestaurantOwner(restaurantId);
       }
 

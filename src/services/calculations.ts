@@ -1,4 +1,4 @@
-import { Item, Issue, StoreHealthScoreBreakdown } from '../types';
+import { Item, Issue, Purchase, StoreHealthScoreBreakdown } from '../types';
 
 /**
  * Weighted Average Costing Formula:
@@ -329,3 +329,63 @@ export function calculateWhereDidMyMoneyGo(
     wastagePercent: stockConsumed > 0 ? Number(((wastageValue / stockConsumed) * 100).toFixed(1)) : 0,
   };
 }
+
+/**
+ * Derives accurate invoice payment metrics from purchase records
+ */
+export function getPurchasePaymentInfo(purchase: Purchase): {
+  status: 'PAID' | 'PARTIALLY_PAID' | 'UNPAID';
+  displayStatus: 'PAID' | 'PARTIALLY PAID' | 'UNPAID';
+  paidAmount: number;
+  remainingAmount: number;
+  badgeVariant: 'success' | 'warning' | 'danger';
+} {
+  const netAmount = Math.max(0, Number(purchase.netAmount) || 0);
+  let paidAmount = 0;
+
+  if (purchase.paidAmount !== undefined && purchase.paidAmount !== null) {
+    paidAmount = Math.max(0, Number(purchase.paidAmount) || 0);
+  } else {
+    const rawStatus = String(purchase.paymentStatus || '').toUpperCase();
+    if (rawStatus === 'PAID') {
+      paidAmount = netAmount;
+    } else {
+      paidAmount = 0;
+    }
+  }
+
+  // Ensure paid does not exceed net for display calculations
+  paidAmount = Math.min(paidAmount, netAmount);
+
+  const remainingAmount =
+    purchase.remainingAmount !== undefined && purchase.remainingAmount !== null
+      ? Math.max(0, Number(purchase.remainingAmount) || 0)
+      : Math.max(0, Number((netAmount - paidAmount).toFixed(2)));
+
+  if (remainingAmount <= 0.01 && (paidAmount > 0 || netAmount === 0)) {
+    return {
+      status: 'PAID',
+      displayStatus: 'PAID',
+      paidAmount: netAmount,
+      remainingAmount: 0,
+      badgeVariant: 'success',
+    };
+  } else if (paidAmount > 0.01) {
+    return {
+      status: 'PARTIALLY_PAID',
+      displayStatus: 'PARTIALLY PAID',
+      paidAmount: Number(paidAmount.toFixed(2)),
+      remainingAmount: Number(remainingAmount.toFixed(2)),
+      badgeVariant: 'warning',
+    };
+  } else {
+    return {
+      status: 'UNPAID',
+      displayStatus: 'UNPAID',
+      paidAmount: 0,
+      remainingAmount: netAmount,
+      badgeVariant: 'danger',
+    };
+  }
+}
+

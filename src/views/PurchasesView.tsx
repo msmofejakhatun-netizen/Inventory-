@@ -16,13 +16,18 @@ import {
 import { collection, onSnapshot, query, orderBy, limit } from 'firebase/firestore';
 import { db } from '../firebase/config';
 import { useAuth } from '../context/AuthContext';
-import { Item, Vendor, Purchase, PurchaseItemRow, Department } from '../types';
+import { Item, Vendor, Purchase, PurchaseItemRow, Department, VendorPayment, PaymentMode } from '../types';
 import {
   calculateWeightedAverageCost,
   calculateAverageDailyConsumption,
   calculateExcessStock,
+  getPurchasePaymentInfo,
 } from '../services/calculations';
-import { executePurchaseTransaction } from '../services/restaurantService';
+import {
+  executePurchaseTransaction,
+  executeVendorPaymentTransaction,
+  reconcilePaymentWithPurchase,
+} from '../services/restaurantService';
 import { exportToPdf, exportToCsv } from '../services/exportService';
 import { Modal } from '../components/common/Modal';
 import { Badge } from '../components/common/Badge';
@@ -33,6 +38,7 @@ export const PurchasesView: React.FC = () => {
   const [purchases, setPurchases] = useState<Purchase[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [vendors, setVendors] = useState<Vendor[]>([]);
+  const [payments, setPayments] = useState<VendorPayment[]>([]);
   const [loading, setLoading] = useState(true);
 
   // New Purchase Form Modal
@@ -54,6 +60,16 @@ export const PurchasesView: React.FC = () => {
   const [overrideReason, setOverrideReason] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+
+  // Bill Payment Modal state
+  const [payingPurchase, setPayingPurchase] = useState<Purchase | null>(null);
+  const [payAmount, setPayAmount] = useState<number>(0);
+  const [payMode, setPayMode] = useState<PaymentMode>('BANK_TRANSFER');
+  const [payDate, setPayDate] = useState<string>(new Date().toISOString().slice(0, 10));
+  const [payReference, setPayReference] = useState<string>('');
+  const [payNotes, setPayNotes] = useState<string>('');
+  const [submittingPayment, setSubmittingPayment] = useState<boolean>(false);
+  const [paymentError, setPaymentError] = useState<string | null>(null);
 
   // Filter state
   const [searchQuery, setSearchQuery] = useState('');
@@ -81,10 +97,18 @@ export const PurchasesView: React.FC = () => {
       setVendors(list);
     });
 
+    const unsubPayments = onSnapshot(
+      query(collection(db, 'restaurants', activeRestaurantId, 'vendorPayments'), orderBy('createdAt', 'desc'), limit(100)),
+      (snap) => {
+        setPayments(snap.docs.map((d) => d.data() as VendorPayment));
+      }
+    );
+
     return () => {
       unsubPurchases();
       unsubItems();
       unsubVendors();
+      unsubPayments();
     };
   }, [activeRestaurantId]);
 
@@ -244,31 +268,131 @@ export const PurchasesView: React.FC = () => {
     return matchSearch && matchVendor;
   });
 
+  const openPayModal = (p: Purchase) => {
+    const payInfo = getPurchasePaymentInfo(p);
+    setPayingPurchase(p);
+    setPayAmount(payInfo.remainingAmount);
+    setPayMode('BANK_TRANSFER');
+    setPayDate(new Date().toISOString().slice(0, 10));
+    setPayReference('');
+    setPayNotes(`Payment for Bill #${p.billNumber}`);
+    setPaymentError(null);
+  };
+
+  const handleConfirmPayment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeRestaurantId || !payingPurchase) return;
+
+    const payInfo = getPurchasePaymentInfo(payingPurchase);
+    const amount = Number(payAmount);
+
+    if (amount <= 0) {
+      setPaymentError('Payment amount must be greater than zero.');
+      return;
+    }
+
+    if (amount > payInfo.remainingAmount + 0.01) {
+      setPaymentError(
+        `Payment amount (${currencySymbol}${amount.toFixed(2)}) exceeds invoice remaining due of ${currencySymbol}${payInfo.remainingAmount.toFixed(2)}.`
+      );
+      return;
+    }
+
+    try {
+      setSubmittingPayment(true);
+      setPaymentError(null);
+
+      await executeVendorPaymentTransaction(activeRestaurantId, {
+        vendorId: payingPurchase.vendorId,
+        vendorName: payingPurchase.vendorName,
+        purchaseId: payingPurchase.id,
+        billNumber: payingPurchase.billNumber,
+        amount,
+        paymentMode: payMode,
+        paymentDate: payDate || new Date().toISOString().slice(0, 10),
+        reference: payReference.trim(),
+        notes: payNotes.trim(),
+        recordedByUid: user?.uid || 'staff',
+        recordedByName: userProfile?.name || user?.displayName || 'Staff',
+      });
+
+      setPayingPurchase(null);
+    } catch (err: any) {
+      console.error('Invoice payment failed:', err);
+      setPaymentError(err?.message || 'Payment transaction failed');
+    } finally {
+      setSubmittingPayment(false);
+    }
+  };
+
+  const handleReconcileUnlinkedPayment = async (paymentId: string, purchaseId: string) => {
+    if (!activeRestaurantId) return;
+    try {
+      setSubmittingPayment(true);
+      setPaymentError(null);
+      await reconcilePaymentWithPurchase(activeRestaurantId, {
+        paymentId,
+        purchaseId,
+        recordedByUid: user?.uid || 'staff',
+        recordedByName: userProfile?.name || user?.displayName || 'Staff',
+      });
+      setPayingPurchase(null);
+    } catch (err: any) {
+      console.error('Reconciliation failed:', err);
+      setPaymentError(err?.message || 'Failed to reconcile payment voucher with bill.');
+    } finally {
+      setSubmittingPayment(false);
+    }
+  };
+
   const handleExportCsv = () => {
-    const headers = ['Bill Number', 'Bill Date', 'Vendor', 'Items Count', 'Net Amount', 'Status', 'Override'];
-    const rows = filteredPurchases.map((p) => [
-      p.billNumber,
-      p.billDate,
-      p.vendorName,
-      p.itemsCount,
-      p.netAmount,
-      p.paymentStatus,
-      p.isOverride ? `Yes (${p.overrideReason})` : 'No',
-    ]);
+    const headers = [
+      'Bill Number',
+      'PO Number',
+      'Bill Date',
+      'Vendor',
+      'Items Count',
+      'Net Amount',
+      'Paid Amount',
+      'Remaining Balance',
+      'Payment Status',
+      'Safeguard Override',
+    ];
+    const rows = filteredPurchases.map((p) => {
+      const payInfo = getPurchasePaymentInfo(p);
+      return [
+        p.billNumber,
+        p.poNumber || 'Direct Purchase',
+        p.billDate,
+        p.vendorName,
+        p.itemsCount,
+        p.netAmount,
+        payInfo.paidAmount,
+        payInfo.remainingAmount,
+        payInfo.displayStatus,
+        p.isOverride ? `Yes (${p.overrideReason})` : 'No',
+      ];
+    });
     exportToCsv(`purchases_${activeRestaurant?.name || 'store'}`, headers, rows);
   };
 
   const handleExportPdf = () => {
-    const headers = ['Bill #', 'Date', 'Vendor', 'Items', 'Net Amount', 'Status'];
-    const rows = filteredPurchases.map((p) => [
-      p.billNumber,
-      p.billDate,
-      p.vendorName,
-      p.itemsCount,
-      `${currencySymbol}${p.netAmount}`,
-      p.paymentStatus,
-    ]);
-    exportToPdf('Inward Purchases Ledger', activeRestaurant?.name || 'Store', headers, rows);
+    const headers = ['Bill #', 'PO #', 'Date', 'Vendor', 'Items', 'Net Amount', 'Paid', 'Due', 'Status'];
+    const rows = filteredPurchases.map((p) => {
+      const payInfo = getPurchasePaymentInfo(p);
+      return [
+        p.billNumber,
+        p.poNumber || '—',
+        p.billDate,
+        p.vendorName,
+        p.itemsCount,
+        `${currencySymbol}${p.netAmount.toFixed(2)}`,
+        `${currencySymbol}${payInfo.paidAmount.toFixed(2)}`,
+        `${currencySymbol}${payInfo.remainingAmount.toFixed(2)}`,
+        payInfo.displayStatus,
+      ];
+    });
+    exportToPdf('Inward Purchases & Payment Ledger', activeRestaurant?.name || 'Store', headers, rows);
   };
 
   return (
@@ -345,6 +469,7 @@ export const PurchasesView: React.FC = () => {
             <thead className="bg-stone-50 border-b border-stone-200 text-[11px] font-bold text-stone-700 uppercase tracking-wider">
               <tr>
                 <th className="py-3 px-4">Bill Number</th>
+                <th className="py-3 px-4">PO Number</th>
                 <th className="py-3 px-4">Bill Date</th>
                 <th className="py-3 px-4">Vendor</th>
                 <th className="py-3 px-4">Items Included</th>
@@ -352,50 +477,107 @@ export const PurchasesView: React.FC = () => {
                 <th className="py-3 px-4">Payment Status</th>
                 <th className="py-3 px-4">Safeguard Override</th>
                 <th className="py-3 px-4">Recorded By</th>
+                <th className="py-3 px-4 text-right">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-stone-100">
               {loading ? (
                 <tr>
-                  <td colSpan={8} className="py-10 text-center text-stone-400">
+                  <td colSpan={10} className="py-10 text-center text-stone-400">
                     Loading purchases...
                   </td>
                 </tr>
               ) : filteredPurchases.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="py-12 text-center text-stone-400">
+                  <td colSpan={10} className="py-12 text-center text-stone-400">
                     No inward purchase bills recorded yet.
                   </td>
                 </tr>
               ) : (
-                filteredPurchases.map((p) => (
-                  <tr key={p.id} className="hover:bg-stone-50/60 transition-colors">
-                    <td className="py-3 px-4 font-bold text-stone-900 font-mono">{p.billNumber}</td>
-                    <td className="py-3 px-4 text-stone-600">{p.billDate}</td>
-                    <td className="py-3 px-4 font-semibold text-stone-800">{p.vendorName}</td>
-                    <td className="py-3 px-4 text-stone-600">
-                      {p.items?.map((i) => `${i.itemName} (${i.quantity} ${i.unit})`).join(', ') || `${p.itemsCount} items`}
-                    </td>
-                    <td className="py-3 px-4 text-right font-bold text-stone-900">
-                      {currencySymbol}{p.netAmount.toFixed(2)}
-                    </td>
-                    <td className="py-3 px-4">
-                      <Badge variant={p.paymentStatus === 'paid' ? 'success' : 'warning'} size="sm">
-                        {p.paymentStatus.toUpperCase()}
-                      </Badge>
-                    </td>
-                    <td className="py-3 px-4">
-                      {p.isOverride ? (
-                        <span className="text-[11px] text-amber-700 font-medium">
-                          Override: {p.overrideReason}
-                        </span>
-                      ) : (
-                        <span className="text-stone-400 text-[11px]">Normal</span>
-                      )}
-                    </td>
-                    <td className="py-3 px-4 text-stone-500 text-[11px]">{p.recordedByName}</td>
-                  </tr>
-                ))
+                filteredPurchases.map((p) => {
+                  const payInfo = getPurchasePaymentInfo(p);
+                  return (
+                    <tr key={p.id} className="hover:bg-stone-50/60 transition-colors">
+                      <td className="py-3 px-4 font-bold text-stone-900 font-mono">
+                        <div className="flex flex-col">
+                          <span>{p.billNumber}</span>
+                          {p.invoiceImageUrl && (
+                            <a
+                              href={p.invoiceImageUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-[10px] text-amber-600 hover:underline inline-flex items-center gap-0.5 mt-0.5"
+                            >
+                              View Bill Photo
+                            </a>
+                          )}
+                        </div>
+                      </td>
+                      <td className="py-3 px-4">
+                        {p.poNumber ? (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-mono font-medium bg-sky-50 text-sky-700 border border-sky-200">
+                            {p.poNumber}
+                          </span>
+                        ) : (
+                          <span className="text-stone-400 text-[11px]">Direct</span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 text-stone-600">{p.billDate}</td>
+                      <td className="py-3 px-4 font-semibold text-stone-800">{p.vendorName}</td>
+                      <td className="py-3 px-4 text-stone-600">
+                        {p.items?.map((i) => `${i.itemName} (${i.quantity} ${i.unit})`).join(', ') || `${p.itemsCount} items`}
+                      </td>
+                      <td className="py-3 px-4 text-right font-bold text-stone-900">
+                        {currencySymbol}{p.netAmount.toFixed(2)}
+                      </td>
+                      <td className="py-3 px-4">
+                        <div className="flex flex-col items-start gap-0.5">
+                          <Badge variant={payInfo.badgeVariant} size="sm">
+                            {payInfo.displayStatus}
+                          </Badge>
+                          {payInfo.status === 'PARTIALLY_PAID' && (
+                            <span className="text-[10px] text-amber-700 font-mono">
+                              Paid: {currencySymbol}{payInfo.paidAmount.toFixed(2)} · Due: {currencySymbol}{payInfo.remainingAmount.toFixed(2)}
+                            </span>
+                          )}
+                          {payInfo.status === 'UNPAID' && (
+                            <span className="text-[10px] text-stone-500 font-mono">
+                              Due: {currencySymbol}{payInfo.remainingAmount.toFixed(2)}
+                            </span>
+                          )}
+                          {payInfo.status === 'PAID' && (
+                            <span className="text-[10px] text-emerald-600 font-mono">
+                              Settled ({currencySymbol}{payInfo.paidAmount.toFixed(2)})
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="py-3 px-4">
+                        {p.isOverride ? (
+                          <span className="text-[11px] text-amber-700 font-medium">
+                            Override: {p.overrideReason}
+                          </span>
+                        ) : (
+                          <span className="text-stone-400 text-[11px]">Normal</span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 text-stone-500 text-[11px]">{p.recordedByName}</td>
+                      <td className="py-3 px-4 text-right">
+                        {payInfo.status !== 'PAID' ? (
+                          <button
+                            id={`pay-bill-${p.billNumber}`}
+                            onClick={() => openPayModal(p)}
+                            className="px-2.5 py-1 text-[11px] font-semibold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 rounded-md border border-emerald-200 transition-colors"
+                          >
+                            Pay Bill
+                          </button>
+                        ) : (
+                          <span className="text-[11px] text-emerald-700 font-medium">Paid</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>
@@ -656,6 +838,222 @@ export const PurchasesView: React.FC = () => {
           </div>
         </form>
       </Modal>
+
+      {/* Record Payment against Invoice Modal */}
+      {payingPurchase && (
+        <Modal
+          isOpen={!!payingPurchase}
+          onClose={() => setPayingPurchase(null)}
+          title={`Record Payment for Bill #${payingPurchase.billNumber}`}
+          subtitle={`Vendor: ${payingPurchase.vendorName} · Bill Date: ${payingPurchase.billDate}`}
+          maxWidth="lg"
+        >
+          {(() => {
+            const payInfo = getPurchasePaymentInfo(payingPurchase);
+            const unlinkedPayments = payments.filter(
+              (p) => (!p.purchaseId || p.purchaseId === '') && p.vendorId === payingPurchase.vendorId
+            );
+            const remainingAfterPay = Math.max(0, payInfo.remainingAmount - (Number(payAmount) || 0));
+            const isOverpaying = Number(payAmount) > payInfo.remainingAmount + 0.01;
+
+            return (
+              <div className="space-y-4">
+                {paymentError && (
+                  <div className="p-3 bg-rose-50 border border-rose-200 text-xs text-rose-800 rounded-lg flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                    <span>{paymentError}</span>
+                  </div>
+                )}
+
+                {/* Invoice Metrics */}
+                <div className="grid grid-cols-3 gap-2 bg-stone-50 border border-stone-200 p-3 rounded-xl text-center">
+                  <div>
+                    <span className="text-[10px] uppercase font-bold text-stone-500 block">Total Bill</span>
+                    <span className="text-sm font-bold text-stone-900 font-mono">
+                      {currencySymbol}{payingPurchase.netAmount.toFixed(2)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] uppercase font-bold text-stone-500 block">Already Paid</span>
+                    <span className="text-sm font-bold text-emerald-700 font-mono">
+                      {currencySymbol}{payInfo.paidAmount.toFixed(2)}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] uppercase font-bold text-stone-500 block">Remaining Due</span>
+                    <span className="text-sm font-bold text-rose-700 font-mono">
+                      {currencySymbol}{payInfo.remainingAmount.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Safe Historical Payment Reconciliation Banner */}
+                {unlinkedPayments.length > 0 && (
+                  <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-xl space-y-2">
+                    <div className="flex items-center gap-1.5 text-xs font-bold text-amber-900">
+                      <Info className="w-4 h-4 text-amber-600" />
+                      <span>Existing Unlinked Payment Found</span>
+                    </div>
+                    <p className="text-[11px] text-amber-800">
+                      If you already disbursed money to {payingPurchase.vendorName} prior to bill linking, link the payment voucher below instead of paying again:
+                    </p>
+                    <div className="space-y-1.5">
+                      {unlinkedPayments.map((up) => (
+                        <div
+                          key={up.id}
+                          className="flex items-center justify-between p-2 bg-white rounded-lg border border-amber-200 text-xs"
+                        >
+                          <div>
+                            <span className="font-bold text-stone-900 font-mono">
+                              {currencySymbol}{up.amount.toFixed(2)}
+                            </span>
+                            <span className="text-stone-500 text-[11px] ml-2">
+                              via {up.paymentMode} ({up.paymentDate || up.createdAt.slice(0, 10)})
+                              {up.reference ? ` · Ref: ${up.reference}` : ''}
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            disabled={submittingPayment}
+                            onClick={() => handleReconcileUnlinkedPayment(up.id, payingPurchase.id)}
+                            className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded text-[11px] font-semibold transition-colors disabled:opacity-50"
+                          >
+                            Link to Bill #{payingPurchase.billNumber}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* New Payment Form */}
+                <form onSubmit={handleConfirmPayment} className="space-y-4 pt-1">
+                  <div>
+                    <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1">
+                      Payment Amount ({currencySymbol}) *
+                    </label>
+                    <input
+                      type="number"
+                      min={0.01}
+                      max={payInfo.remainingAmount}
+                      step="any"
+                      required
+                      value={payAmount}
+                      onChange={(e) => setPayAmount(Number(e.target.value))}
+                      className={`w-full px-3 py-2 text-xs border rounded-lg font-bold text-stone-900 focus:outline-none ${
+                        isOverpaying
+                          ? 'border-rose-400 bg-rose-50/40 focus:border-rose-500'
+                          : 'border-stone-300 focus:border-amber-500'
+                      }`}
+                    />
+                    <div className="mt-1.5 flex items-center justify-between text-[11px]">
+                      {isOverpaying ? (
+                        <span className="text-rose-600 font-semibold">
+                          Payment exceeds remaining due of {currencySymbol}{payInfo.remainingAmount.toFixed(2)}
+                        </span>
+                      ) : (
+                        <span className="text-stone-500">
+                          Balance after payment:{' '}
+                          <strong className="text-stone-800 font-mono">
+                            {currencySymbol}{remainingAfterPay.toFixed(2)}
+                          </strong>{' '}
+                          · Status will become:{' '}
+                          <strong className={remainingAfterPay <= 0.01 ? 'text-emerald-700' : 'text-amber-700'}>
+                            {remainingAfterPay <= 0.01 ? 'PAID' : 'PARTIALLY PAID'}
+                          </strong>
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setPayAmount(payInfo.remainingAmount)}
+                        className="text-amber-700 hover:text-amber-800 font-semibold underline text-[11px]"
+                      >
+                        Pay Full Due ({currencySymbol}{payInfo.remainingAmount.toFixed(2)})
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1">
+                        Payment Mode
+                      </label>
+                      <select
+                        value={payMode}
+                        onChange={(e) => setPayMode(e.target.value as PaymentMode)}
+                        className="w-full px-3 py-2 text-xs border border-stone-300 rounded-lg bg-white"
+                      >
+                        <option value="BANK_TRANSFER">Bank NEFT / RTGS</option>
+                        <option value="UPI">UPI / GPay / PhonePe</option>
+                        <option value="CASH">Cash</option>
+                        <option value="CHEQUE">Cheque</option>
+                        <option value="CARD">Card</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1">
+                        Payment Date
+                      </label>
+                      <input
+                        type="date"
+                        required
+                        value={payDate}
+                        onChange={(e) => setPayDate(e.target.value)}
+                        className="w-full px-3 py-2 text-xs border border-stone-300 rounded-lg"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1">
+                        Transaction / Reference #
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="e.g. UTR-9988221 / CHQ-10492"
+                        value={payReference}
+                        onChange={(e) => setPayReference(e.target.value)}
+                        className="w-full px-3 py-2 text-xs border border-stone-300 rounded-lg font-mono focus:outline-none"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1">
+                        Payment Notes
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="e.g. Settle bill 90"
+                        value={payNotes}
+                        onChange={(e) => setPayNotes(e.target.value)}
+                        className="w-full px-3 py-2 text-xs border border-stone-300 rounded-lg"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="pt-3 flex justify-end gap-2 border-t border-stone-100">
+                    <button
+                      type="button"
+                      onClick={() => setPayingPurchase(null)}
+                      className="px-4 py-2 text-xs font-semibold text-stone-600"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      id="confirm-invoice-payment-btn"
+                      type="submit"
+                      disabled={submittingPayment || payAmount <= 0 || isOverpaying}
+                      className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-xs disabled:opacity-50 transition-colors"
+                    >
+                      {submittingPayment ? 'Recording Payment...' : 'Confirm Payment Voucher'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            );
+          })()}
+        </Modal>
+      )}
     </div>
   );
 };
