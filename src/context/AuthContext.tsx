@@ -24,6 +24,8 @@ import { auth, db, validateFirebaseConnection } from '../firebase/config';
 import { handleFirestoreError, OperationType } from '../firebase/errorHandler';
 import { UserProfile, Restaurant, RestaurantUser, UserRole } from '../types';
 
+export type LoadingStage = 'connecting' | 'authenticating' | 'fetching_data' | 'syncing_inventory' | 'ready';
+
 interface AuthContextType {
   user: FirebaseUser | null;
   userProfile: UserProfile | null;
@@ -32,8 +34,11 @@ interface AuthContextType {
   activeRole: UserRole | null;
   userRestaurants: Restaurant[];
   loading: boolean;
+  loadingStage: LoadingStage;
+  loadingProgress: number;
   error: string | null;
   isFirebaseOffline: boolean;
+  retryInitialization: () => Promise<void>;
   loginWithGoogle: () => Promise<void>;
   setUpPhoneRecaptcha: (containerId: string) => RecaptchaVerifier;
   sendPhoneOtp: (phoneNumber: string, appVerifier: RecaptchaVerifier) => Promise<ConfirmationResult>;
@@ -54,6 +59,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [activeRole, setActiveRole] = useState<UserRole | null>(null);
   const [userRestaurants, setUserRestaurants] = useState<Restaurant[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
+  const [loadingStage, setLoadingStage] = useState<LoadingStage>('connecting');
+  const [loadingProgress, setLoadingProgress] = useState<number>(25);
   const [error, setError] = useState<string | null>(null);
   const [isFirebaseOffline, setIsFirebaseOffline] = useState<boolean>(false);
 
@@ -63,6 +70,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!res.ok) {
         setIsFirebaseOffline(true);
         setError(res.message || 'Firebase is offline');
+        setLoading(false);
+      } else {
+        setLoadingStage('authenticating');
+        setLoadingProgress(50);
       }
     });
   }, []);
@@ -77,11 +88,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setActiveRestaurantId(null);
         setActiveRole(null);
         setUserRestaurants([]);
+        setLoadingStage('ready');
+        setLoadingProgress(100);
         setLoading(false);
         return;
       }
 
       try {
+        setLoadingStage('fetching_data');
+        setLoadingProgress(70);
+
         const userDocRef = doc(db, 'users', currentUser.uid);
         const userSnap = await getDoc(userDocRef);
         const now = new Date().toISOString();
@@ -111,7 +127,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setUserProfile(profileData);
 
         // Fetch restaurants for this user
+        setLoadingStage('syncing_inventory');
+        setLoadingProgress(90);
         await loadUserRestaurants(currentUser.uid, profileData.restaurantIds || []);
+
+        setLoadingStage('ready');
+        setLoadingProgress(100);
       } catch (err) {
         console.error('Error fetching user profile:', err);
         setError(err instanceof Error ? err.message : String(err));
@@ -122,6 +143,57 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     return () => unsubscribe();
   }, []);
+
+  // Retry initialization on user action
+  const retryInitialization = async () => {
+    setError(null);
+    setIsFirebaseOffline(false);
+    setLoading(true);
+    setLoadingStage('connecting');
+    setLoadingProgress(25);
+
+    try {
+      const connRes = await validateFirebaseConnection();
+      if (!connRes.ok) {
+        setIsFirebaseOffline(true);
+        setError(connRes.message || 'Firebase is offline');
+        setLoading(false);
+        return;
+      }
+
+      setLoadingStage('authenticating');
+      setLoadingProgress(50);
+
+      const currentUser = auth.currentUser;
+      if (!currentUser) {
+        setLoadingStage('ready');
+        setLoadingProgress(100);
+        setLoading(false);
+        return;
+      }
+
+      setLoadingStage('fetching_data');
+      setLoadingProgress(70);
+
+      const userDocRef = doc(db, 'users', currentUser.uid);
+      const userSnap = await getDoc(userDocRef);
+      if (userSnap.exists()) {
+        const profile = userSnap.data() as UserProfile;
+        setUserProfile(profile);
+        setLoadingStage('syncing_inventory');
+        setLoadingProgress(90);
+        await loadUserRestaurants(currentUser.uid, profile.restaurantIds || []);
+      }
+
+      setLoadingStage('ready');
+      setLoadingProgress(100);
+      setLoading(false);
+    } catch (err) {
+      console.error('Retry initialization failed:', err);
+      setError(err instanceof Error ? err.message : 'Failed to connect to Firebase database');
+      setLoading(false);
+    }
+  };
 
   // Fetch restaurants where user is owner or member
   const loadUserRestaurants = async (uid: string, assignedRestaurantIds: string[]) => {
@@ -267,8 +339,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         activeRole,
         userRestaurants,
         loading,
+        loadingStage,
+        loadingProgress,
         error,
         isFirebaseOffline,
+        retryInitialization,
         loginWithGoogle,
         setUpPhoneRecaptcha,
         sendPhoneOtp,

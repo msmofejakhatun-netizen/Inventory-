@@ -1,1 +1,59 @@
 @import "tailwindcss";
+
+@layer utilities {
+  @keyframes spin-smooth {
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @keyframes spin-reverse-smooth {
+    from {
+      transform: rotate(360deg);
+    }
+    to {
+      transform: rotate(0deg);
+    }
+  }
+
+  @keyframes pulse-glow {
+    0%, 100% {
+      box-shadow: 0 0 25px rgba(245, 158, 11, 0.3), 0 0 50px rgba(245, 158, 11, 0.12);
+    }
+    50% {
+      box-shadow: 0 0 45px rgba(245, 158, 11, 0.55), 0 0 80px rgba(245, 158, 11, 0.25);
+    }
+  }
+
+  @keyframes float-subtle {
+    0%, 100% {
+      transform: translateY(0px) rotate(0deg);
+    }
+    50% {
+      transform: translateY(-6px) rotate(1.5deg);
+    }
+  }
+
+  @keyframes shimmer-slide {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(250%);
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-spin-smooth,
+  .animate-spin-reverse,
+  .animate-float,
+  .animate-pulse-glow,
+  .animate-shimmer {
+    animation: none !important;
+    transform: none !important;
+  }
+}

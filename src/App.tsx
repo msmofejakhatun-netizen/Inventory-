@@ -28,28 +28,36 @@ import { AIAssistantView } from './views/AIAssistantView';
 import { SubscriptionView } from './views/SubscriptionView';
 import { AuditLogsView } from './views/AuditLogsView';
 import { SettingsView } from './views/SettingsView';
-import { Boxes } from 'lucide-react';
+import { LoadingScreen } from './components/loading/LoadingScreen';
 
 const AppContent: React.FC = () => {
-  const { user, loading, userRestaurants, activeRestaurant } = useAuth();
+  const {
+    user,
+    loading,
+    loadingStage,
+    loadingProgress,
+    error,
+    isFirebaseOffline,
+    retryInitialization,
+    userRestaurants,
+    activeRestaurant,
+  } = useAuth();
   const [activeTab, setActiveTab] = useState<NavTab>('dashboard');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isNotifsOpen, setIsNotifsOpen] = useState(false);
+  const [isTransitionDone, setIsTransitionDone] = useState(false);
 
-  // Loading state
-  if (loading) {
+  // Premium SaaS Loading Screen with real Firebase/Auth state
+  if (!isTransitionDone) {
     return (
-      <div className="min-h-screen bg-stone-900 flex flex-col items-center justify-center text-white space-y-4">
-        <div className="w-12 h-12 rounded-xl bg-amber-500 text-stone-950 flex items-center justify-center animate-pulse">
-          <Boxes className="w-7 h-7" />
-        </div>
-        <div className="text-center">
-          <h2 className="text-sm font-bold uppercase tracking-wider text-stone-200">
-            Restaurant Store Control System
-          </h2>
-          <p className="text-xs text-stone-500 mt-1">Connecting to Firestore Database...</p>
-        </div>
-      </div>
+      <LoadingScreen
+        isReady={!loading && !error && !isFirebaseOffline}
+        stage={loadingStage}
+        progress={loadingProgress}
+        error={error || (isFirebaseOffline ? 'Firebase client is offline' : null)}
+        onRetry={retryInitialization}
+        onComplete={() => setIsTransitionDone(true)}
+      />
     );
   }
 
