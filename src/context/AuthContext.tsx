@@ -23,6 +23,7 @@ import {
 import { auth, db, validateFirebaseConnection } from '../firebase/config';
 import { handleFirestoreError, OperationType } from '../firebase/errorHandler';
 import { UserProfile, Restaurant, RestaurantUser, UserRole } from '../types';
+import { activatePendingInvitationsForUser } from '../services/restaurantService';
 
 export type LoadingStage = 'connecting' | 'authenticating' | 'fetching_data' | 'syncing_inventory' | 'ready';
 
@@ -126,10 +127,28 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         setUserProfile(profileData);
 
+        // Check and activate any authorized staff invitations for this user's verified identity
+        let effectiveRestaurantIds = profileData.restaurantIds || [];
+        if (currentUser.email) {
+          try {
+            const newlyActivated = await activatePendingInvitationsForUser({
+              uid: currentUser.uid,
+              email: currentUser.email,
+              displayName: currentUser.displayName || profileData.name,
+            });
+            if (newlyActivated.length > 0) {
+              effectiveRestaurantIds = Array.from(new Set([...effectiveRestaurantIds, ...newlyActivated]));
+              setUserProfile((prev) => (prev ? { ...prev, restaurantIds: effectiveRestaurantIds } : prev));
+            }
+          } catch (invErr) {
+            console.error('Error during invitation activation check:', invErr);
+          }
+        }
+
         // Fetch restaurants for this user
         setLoadingStage('syncing_inventory');
         setLoadingProgress(90);
-        await loadUserRestaurants(currentUser.uid, profileData.restaurantIds || []);
+        await loadUserRestaurants(currentUser.uid, effectiveRestaurantIds);
 
         setLoadingStage('ready');
         setLoadingProgress(100);

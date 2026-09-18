@@ -66,6 +66,13 @@ service cloud.firestore {
       allow delete: if isUser(userId);
     }
 
+    // Collection group query for pending invitations by verified email
+    match /{path=**}/invitations/{invitationId} {
+      allow read: if isSignedIn() && (
+        request.auth.token.email != null && resource.data.email == request.auth.token.email
+      );
+    }
+
     // Multi-tenant Restaurants
     match /restaurants/{restaurantId} {
       allow get: if isMemberOfRestaurant(restaurantId);
@@ -79,6 +86,35 @@ service cloud.firestore {
                     request.resource.data.currency is string;
       allow update: if isRestaurantManager(restaurantId) && request.resource.data.ownerUid == resource.data.ownerUid;
       allow delete: if isRestaurantOwner(restaurantId);
+
+      // Authorized Staff Invitations
+      match /invitations/{invitationId} {
+        allow get: if isSignedIn() && (
+          isMemberOfRestaurant(restaurantId) ||
+          (request.auth.token.email != null && resource.data.email == request.auth.token.email)
+        );
+        allow list: if isSignedIn() && (
+          isRestaurantManager(restaurantId) ||
+          (request.auth.token.email != null && resource.data.email == request.auth.token.email)
+        );
+        allow create: if isRestaurantManager(restaurantId) &&
+                      request.resource.data.restaurantId == restaurantId &&
+                      request.resource.data.status == 'PENDING' &&
+                      request.resource.data.requestedRole in ['OWNER', 'MANAGER', 'STOREKEEPER', 'DEPARTMENT_STAFF'] &&
+                      request.resource.data.invitedByUid == request.auth.uid;
+        allow update: if isRestaurantManager(restaurantId) || (
+          // Invited user accepting or declining upon sign-in
+          isSignedIn() &&
+          request.auth.token.email != null &&
+          resource.data.email == request.auth.token.email &&
+          resource.data.status == 'PENDING' &&
+          request.resource.data.status in ['ACCEPTED', 'DECLINED'] &&
+          request.resource.data.requestedRole == resource.data.requestedRole &&
+          request.resource.data.restaurantId == resource.data.restaurantId &&
+          request.resource.data.email == resource.data.email
+        );
+        allow delete: if isRestaurantManager(restaurantId);
+      }
 
       // Staff subcollection
       match /users/{userId} {
@@ -99,6 +135,17 @@ service cloud.firestore {
              getAfter(/databases/$(database)/documents/restaurants/$(restaurantId)).data.ownerUid == request.auth.uid) ||
             (exists(/databases/$(database)/documents/restaurants/$(restaurantId)) &&
              get(/databases/$(database)/documents/restaurants/$(restaurantId)).data.ownerUid == request.auth.uid)
+          )
+        ) || (
+          // Authorized staff member activating their pending invitation
+          isUser(userId) &&
+          request.resource.data.uid == userId &&
+          request.resource.data.restaurantId == restaurantId &&
+          request.resource.data.status == 'active' &&
+          (
+            exists(/databases/$(database)/documents/restaurants/$(restaurantId)/invitations/$(request.resource.data.invitationId)) &&
+            get(/databases/$(database)/documents/restaurants/$(restaurantId)/invitations/$(request.resource.data.invitationId)).data.status in ['PENDING', 'ACCEPTED'] &&
+            request.resource.data.role == get(/databases/$(database)/documents/restaurants/$(restaurantId)/invitations/$(request.resource.data.invitationId)).data.requestedRole
           )
         );
         allow update: if isRestaurantManager(restaurantId) || (

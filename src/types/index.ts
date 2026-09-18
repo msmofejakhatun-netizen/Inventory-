@@ -36,11 +36,30 @@ export interface RestaurantUser {
   email?: string;
   phone?: string;
   role: UserRole;
-  departmentId?: string;
-  departmentName?: string;
+  departmentId?: string | null;
+  departmentName?: string | null;
   restaurantId: string;
   status: 'active' | 'inactive';
+  accountStatus?: 'ACTIVE' | 'SUSPENDED';
   createdAt: string;
+}
+
+export interface StaffInvitation {
+  id: string;
+  restaurantId: string;
+  restaurantName?: string;
+  email: string;
+  fullName: string;
+  requestedRole: UserRole;
+  departmentId?: string | null;
+  departmentName?: string | null;
+  invitedByUid: string;
+  invitedByName?: string;
+  invitedByRole?: UserRole;
+  invitedAt: string;
+  status: 'PENDING' | 'ACCEPTED' | 'REVOKED' | 'EXPIRED';
+  acceptedAt?: string;
+  acceptedByUid?: string;
 }
 
 export interface Department {
@@ -352,10 +371,14 @@ export interface AuditLog {
   id: string;
   actorUid: string;
   actorName: string;
+  actorRole?: string;
   action: string;
   entity: string;
   entityId?: string;
   details?: string;
+  targetEmail?: string;
+  targetRole?: string;
+  department?: string;
   restaurantId: string;
   createdAt: string;
 }

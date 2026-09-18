@@ -1,5 +1,6 @@
 import {
   collection,
+  collectionGroup,
   doc,
   getDoc,
   getDocs,
@@ -14,6 +15,7 @@ import {
   writeBatch,
   serverTimestamp,
   onSnapshot,
+  arrayUnion,
 } from 'firebase/firestore';
 import { db } from '../firebase/config';
 import { handleFirestoreError, OperationType } from '../firebase/errorHandler';
@@ -21,6 +23,8 @@ import { calculateWeightedAverageCost } from './calculations';
 import {
   Restaurant,
   RestaurantUser,
+  StaffInvitation,
+  UserRole,
   Department,
   Item,
   Vendor,
@@ -1671,5 +1675,316 @@ export async function receivePurchaseOrderTransaction(
     handleFirestoreError(err, OperationType.WRITE, `restaurants/${restaurantId}/purchaseOrders/${poId}`);
     throw err;
   }
+}
+
+// ==========================================
+// AUTHORIZED TEAM MEMBERS & INVITATIONS
+// ==========================================
+
+export async function inviteTeamMember(
+  restaurantId: string,
+  restaurantName: string,
+  caller: { uid: string; name: string; role: UserRole },
+  params: {
+    fullName: string;
+    email: string;
+    role: UserRole;
+    departmentId?: string | null;
+    departmentName?: string | null;
+  }
+): Promise<{ success: boolean; invitationId?: string; error?: string }> {
+  if (!restaurantId) {
+    return { success: false, error: 'Restaurant ID is required' };
+  }
+
+  const fullName = params.fullName.trim();
+  const normalizedEmail = params.email.trim().toLowerCase();
+
+  if (!fullName || fullName.length < 2) {
+    return { success: false, error: 'Please enter a valid staff full name.' };
+  }
+
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!normalizedEmail || !emailRegex.test(normalizedEmail)) {
+    return { success: false, error: 'Please enter a valid email address.' };
+  }
+
+  if (!['OWNER', 'MANAGER', 'STOREKEEPER', 'DEPARTMENT_STAFF'].includes(params.role)) {
+    return { success: false, error: 'Invalid staff role specified.' };
+  }
+
+  if (caller.role !== 'OWNER' && caller.role !== 'MANAGER') {
+    return { success: false, error: 'Only restaurant Owners or Managers can authorize team members.' };
+  }
+
+  try {
+    // 1. Check if user already exists as an active member in this restaurant
+    const usersColRef = collection(db, 'restaurants', restaurantId, 'users');
+    const existingUsersSnap = await getDocs(usersColRef);
+    const alreadyMember = existingUsersSnap.docs.some((d) => {
+      const u = d.data() as RestaurantUser;
+      return Boolean(u.email && u.email.trim().toLowerCase() === normalizedEmail);
+    });
+
+    if (alreadyMember) {
+      return {
+        success: false,
+        error: 'Team member already exists or has a pending invitation.',
+      };
+    }
+
+    // 2. Check if a pending invitation already exists for this email in this restaurant
+    const invColRef = collection(db, 'restaurants', restaurantId, 'invitations');
+    const existingInvSnap = await getDocs(
+      query(invColRef, where('email', '==', normalizedEmail), where('status', '==', 'PENDING'))
+    );
+
+    if (!existingInvSnap.empty) {
+      return {
+        success: false,
+        error: 'Team member already exists or has a pending invitation.',
+      };
+    }
+
+    // 3. Create the pending invitation doc
+    const invRef = doc(invColRef);
+    const now = new Date().toISOString();
+
+    const invitationData: StaffInvitation = {
+      id: invRef.id,
+      restaurantId,
+      restaurantName: restaurantName || 'Restaurant',
+      email: normalizedEmail,
+      fullName,
+      requestedRole: params.role,
+      departmentId: params.departmentId || null,
+      departmentName: params.departmentName || null,
+      invitedByUid: caller.uid,
+      invitedByName: caller.name || 'Authorized Manager',
+      invitedByRole: caller.role,
+      invitedAt: now,
+      status: 'PENDING',
+    };
+
+    // 4. Create immutable audit log entry
+    const auditRef = doc(collection(db, 'restaurants', restaurantId, 'auditLogs'));
+    const auditData: AuditLog = {
+      id: auditRef.id,
+      actorUid: caller.uid,
+      actorName: caller.name || 'Authorized Manager',
+      actorRole: caller.role,
+      action: 'TEAM_MEMBER_INVITED',
+      entity: 'TeamMember',
+      entityId: invRef.id,
+      details: `Authorized invitation issued to ${fullName} (${normalizedEmail}) for role ${params.role}${
+        params.departmentName ? ` in ${params.departmentName}` : ''
+      }`,
+      targetEmail: normalizedEmail,
+      targetRole: params.role,
+      department: params.departmentName || 'All Departments',
+      restaurantId,
+      createdAt: now,
+    };
+
+    // Commit both writes
+    const batch = writeBatch(db);
+    batch.set(invRef, invitationData);
+    batch.set(auditRef, auditData);
+    await batch.commit();
+
+    return { success: true, invitationId: invRef.id };
+  } catch (err) {
+    console.error('[inviteTeamMember] Technical diagnostic error:', err);
+    return {
+      success: false,
+      error: 'Unable to add team member. Please try again.',
+    };
+  }
+}
+
+export async function revokeInvitation(
+  restaurantId: string,
+  invitationId: string,
+  caller: { uid: string; name: string; role: UserRole }
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const invRef = doc(db, 'restaurants', restaurantId, 'invitations', invitationId);
+    const invSnap = await getDoc(invRef);
+    if (!invSnap.exists()) {
+      return { success: false, error: 'Invitation not found' };
+    }
+    const invData = invSnap.data() as StaffInvitation;
+    const now = new Date().toISOString();
+
+    const batch = writeBatch(db);
+    batch.update(invRef, {
+      status: 'REVOKED',
+      updatedAt: now,
+    });
+
+    const auditRef = doc(collection(db, 'restaurants', restaurantId, 'auditLogs'));
+    const auditData: AuditLog = {
+      id: auditRef.id,
+      actorUid: caller.uid,
+      actorName: caller.name,
+      actorRole: caller.role,
+      action: 'TEAM_INVITATION_REVOKED',
+      entity: 'StaffInvitation',
+      entityId: invitationId,
+      details: `Revoked pending invitation for ${invData.fullName} (${invData.email})`,
+      targetEmail: invData.email,
+      targetRole: invData.requestedRole,
+      restaurantId,
+      createdAt: now,
+    };
+    batch.set(auditRef, auditData);
+
+    await batch.commit();
+    return { success: true };
+  } catch (err) {
+    console.error('[revokeInvitation] Technical diagnostic error:', err);
+    return { success: false, error: 'Unable to revoke invitation. Please try again.' };
+  }
+}
+
+export async function removeTeamMember(
+  restaurantId: string,
+  memberUid: string,
+  memberName: string,
+  caller: { uid: string; name: string; role: UserRole }
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const memberRef = doc(db, 'restaurants', restaurantId, 'users', memberUid);
+    const memberSnap = await getDoc(memberRef);
+    if (!memberSnap.exists()) {
+      return { success: false, error: 'Member not found' };
+    }
+    const memberData = memberSnap.data() as RestaurantUser;
+    if (memberData.role === 'OWNER') {
+      return { success: false, error: 'Cannot remove restaurant owner' };
+    }
+
+    const now = new Date().toISOString();
+    const batch = writeBatch(db);
+    batch.delete(memberRef);
+
+    const auditRef = doc(collection(db, 'restaurants', restaurantId, 'auditLogs'));
+    const auditData: AuditLog = {
+      id: auditRef.id,
+      actorUid: caller.uid,
+      actorName: caller.name,
+      actorRole: caller.role,
+      action: 'TEAM_MEMBER_REMOVED',
+      entity: 'RestaurantUser',
+      entityId: memberUid,
+      details: `Removed team member ${memberName} (${memberData.email || memberUid}) [Role: ${memberData.role}]`,
+      targetEmail: memberData.email,
+      targetRole: memberData.role,
+      restaurantId,
+      createdAt: now,
+    };
+    batch.set(auditRef, auditData);
+
+    await batch.commit();
+    return { success: true };
+  } catch (err) {
+    console.error('[removeTeamMember] Technical diagnostic error:', err);
+    return { success: false, error: 'Unable to remove team member. Please try again.' };
+  }
+}
+
+export async function activatePendingInvitationsForUser(user: {
+  uid: string;
+  email?: string | null;
+  displayName?: string | null;
+}): Promise<string[]> {
+  if (!user.email) return [];
+  const normalizedEmail = user.email.trim().toLowerCase();
+  const activatedRestaurantIds: string[] = [];
+
+  try {
+    const invQuery = query(
+      collectionGroup(db, 'invitations'),
+      where('email', '==', normalizedEmail),
+      where('status', '==', 'PENDING')
+    );
+    const invSnap = await getDocs(invQuery);
+
+    if (invSnap.empty) {
+      return [];
+    }
+
+    for (const d of invSnap.docs) {
+      const inv = d.data() as StaffInvitation;
+      const rId = inv.restaurantId;
+      if (!rId) continue;
+
+      try {
+        const now = new Date().toISOString();
+        const userMemberRef = doc(db, 'restaurants', rId, 'users', user.uid);
+        const invRef = d.ref;
+
+        const newMember: RestaurantUser = {
+          uid: user.uid,
+          name: user.displayName || inv.fullName || 'Staff Member',
+          email: normalizedEmail,
+          role: inv.requestedRole, // Role strictly enforced from invitation!
+          departmentId: inv.departmentId || null,
+          departmentName: inv.departmentName || null,
+          restaurantId: rId,
+          status: 'active',
+          accountStatus: 'ACTIVE',
+          createdAt: now,
+        };
+
+        const batch = writeBatch(db);
+        batch.set(userMemberRef, newMember);
+        batch.update(invRef, {
+          status: 'ACCEPTED',
+          acceptedAt: now,
+          acceptedByUid: user.uid,
+        });
+
+        // Add to user's root profile restaurantIds
+        const rootUserRef = doc(db, 'users', user.uid);
+        batch.set(
+          rootUserRef,
+          {
+            restaurantIds: arrayUnion(rId),
+          },
+          { merge: true }
+        );
+
+        // Audit log
+        const auditRef = doc(collection(db, 'restaurants', rId, 'auditLogs'));
+        const auditData: AuditLog = {
+          id: auditRef.id,
+          actorUid: user.uid,
+          actorName: user.displayName || inv.fullName,
+          actorRole: inv.requestedRole,
+          action: 'TEAM_MEMBER_ACTIVATED',
+          entity: 'TeamMember',
+          entityId: user.uid,
+          details: `Staff member ${inv.fullName} (${normalizedEmail}) activated account with role ${inv.requestedRole}`,
+          targetEmail: normalizedEmail,
+          targetRole: inv.requestedRole,
+          department: inv.departmentName || 'All Departments',
+          restaurantId: rId,
+          createdAt: now,
+        };
+        batch.set(auditRef, auditData);
+
+        await batch.commit();
+        activatedRestaurantIds.push(rId);
+        console.log(`[Staff Activation] Successfully activated membership for ${normalizedEmail} in restaurant ${rId}`);
+      } catch (activationErr) {
+        console.error(`[Staff Activation] Error activating invitation ${d.id}:`, activationErr);
+      }
+    }
+  } catch (err) {
+    console.error('[activatePendingInvitationsForUser] Diagnostic check:', err);
+  }
+
+  return activatedRestaurantIds;
 }
 

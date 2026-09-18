@@ -51,9 +51,31 @@
         "departmentName": { "type": "string" },
         "restaurantId": { "type": "string" },
         "status": { "type": "string", "enum": ["active", "inactive"] },
+        "accountStatus": { "type": "string", "enum": ["ACTIVE", "SUSPENDED"] },
         "createdAt": { "type": "string" }
       },
       "required": ["uid", "name", "role", "restaurantId"]
+    },
+    "StaffInvitation": {
+      "title": "StaffInvitation",
+      "description": "Authorized invitation for a staff member to join a restaurant",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "restaurantId": { "type": "string" },
+        "restaurantName": { "type": "string" },
+        "email": { "type": "string" },
+        "fullName": { "type": "string" },
+        "requestedRole": { "type": "string", "enum": ["OWNER", "MANAGER", "STOREKEEPER", "DEPARTMENT_STAFF"] },
+        "departmentId": { "type": "string" },
+        "departmentName": { "type": "string" },
+        "invitedByUid": { "type": "string" },
+        "invitedByName": { "type": "string" },
+        "invitedByRole": { "type": "string" },
+        "invitedAt": { "type": "string" },
+        "status": { "type": "string", "enum": ["PENDING", "ACCEPTED", "REVOKED", "EXPIRED"] }
+      },
+      "required": ["id", "restaurantId", "email", "fullName", "requestedRole", "invitedByUid", "status"]
     },
     "Department": {
       "title": "Department",
@@ -416,6 +438,10 @@
     "/restaurants/{restaurantId}/users/{uid}": {
       "schema": "RestaurantUser",
       "description": "Restaurant staff members and RBAC"
+    },
+    "/restaurants/{restaurantId}/invitations/{invitationId}": {
+      "schema": "StaffInvitation",
+      "description": "Authorized staff invitations with RBAC"
     },
     "/restaurants/{restaurantId}/departments/{departmentId}": {
       "schema": "Department",
