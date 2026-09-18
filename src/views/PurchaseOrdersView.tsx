@@ -22,9 +22,6 @@ import {
   PackageCheck,
   Ban,
   FileCheck,
-  Download,
-  Share2,
-  Image as ImageIcon,
 } from 'lucide-react';
 import {
   collection,
@@ -52,10 +49,30 @@ import {
 } from '../services/restaurantService';
 import { exportPurchaseOrderPdf } from '../services/exportService';
 import { sendPoViaWhatsAppApi, fetchWhatsAppStatus } from '../services/whatsappClient';
-import { generateClientPoImage } from '../utils/excelPoImage';
 import { WhatsAppPoHistory } from '../components/whatsapp/WhatsAppPoHistory';
 import { Modal } from '../components/common/Modal';
 import { Badge } from '../components/common/Badge';
+
+export function normalizePurchaseOrderStatus(rawStatus: any): PurchaseOrderStatus {
+  if (!rawStatus) return 'DRAFT';
+  const s = String(rawStatus).trim().toUpperCase();
+  if (s === 'SENT' || s === 'WHATSAPP_SENT' || s === 'ORDER_SENT' || s === 'DISPATCHED') {
+    return 'SENT';
+  }
+  if (s === 'PARTIALLY_RECEIVED' || s === 'PARTIAL' || s === 'PARTIALLY RECEIVED') {
+    return 'PARTIALLY_RECEIVED';
+  }
+  if (s === 'RECEIVED' || s === 'FULFILLED' || s === 'COMPLETED') {
+    return 'RECEIVED';
+  }
+  if (s === 'CANCELLED' || s === 'CANCELED') {
+    return 'CANCELLED';
+  }
+  if (s === 'PENDING_SEND' || s === 'SENDING' || s === 'PENDING') {
+    return 'PENDING_SEND';
+  }
+  return 'DRAFT';
+}
 
 interface WhatsAppModalState {
   isOpen: boolean;
@@ -65,11 +82,7 @@ interface WhatsAppModalState {
   isSending: boolean;
   isNotConnected?: boolean;
   errorMessage?: string;
-  imageUrl: string | null;
-  imageBlob: Blob | null;
-  imageFilename: string;
-  isGeneratingImage: boolean;
-  shareSuccessMessage?: string;
+  successMessage?: string;
 }
 
 interface ReceiveModalState {
@@ -146,11 +159,8 @@ export const PurchaseOrdersView: React.FC = () => {
     vendorPhone: '',
     messageText: '',
     isSending: false,
-    imageUrl: null,
-    imageBlob: null,
-    imageFilename: '',
-    isGeneratingImage: false,
-    shareSuccessMessage: '',
+    errorMessage: '',
+    successMessage: '',
   });
 
   // Receive Order Modal
@@ -184,7 +194,16 @@ export const PurchaseOrdersView: React.FC = () => {
         limit(100)
       ),
       (snap) => {
-        setOrders(snap.docs.map((d) => d.data() as PurchaseOrder));
+        const loadedOrders = snap.docs.map((d) => {
+          const data = d.data();
+          const rawStatus = data?.status ?? (data as any)?.poStatus ?? (data as any)?.orderStatus;
+          return {
+            ...data,
+            id: d.id,
+            status: normalizePurchaseOrderStatus(rawStatus),
+          } as PurchaseOrder;
+        });
+        setOrders(loadedOrders);
         setLoading(false);
       }
     );
@@ -310,22 +329,40 @@ export const PurchaseOrdersView: React.FC = () => {
   };
 
   // -------------------------------------------------------------------------
-  // WHATSAPP WORKFLOW
+  // WHATSAPP WORKFLOW (STRICTLY ONLY ITEM + QUANTITY + UNIT • NO PRICES/RATES/AMOUNTS)
   // -------------------------------------------------------------------------
   const generateWhatsAppMessage = (po: PurchaseOrder, vendorName: string) => {
-    const storeName = activeRestaurant?.name || 'Restaurant Store';
-    const itemsText = po.items
-      .map((it, idx) => {
-        const qty = it.orderedQty || it.recommendedQuantity || 0;
-        return `${idx + 1}. *${it.itemName}* — ${qty} ${it.unit} (Est. Rate: ${currencySymbol}${it.estimatedRate.toFixed(2)})`;
+    const storeName = activeRestaurant?.name || 'Restaurant Store Control';
+    const poDate = po.createdAt
+      ? new Date(po.createdAt).toLocaleDateString('en-IN')
+      : new Date().toLocaleDateString('en-IN');
+
+    const items = po.items || [];
+    const itemsTable = items
+      .map((item) => {
+        const name = (item.itemName || 'ITEM').toUpperCase().trim();
+        const qty = item.orderedQty ?? item.recommendedQuantity ?? 0;
+        const unit = (item.unit || 'UNIT').toUpperCase().trim();
+
+        const paddedName = name.padEnd(28, ' ');
+        const paddedQty = String(qty).padEnd(10, ' ');
+        return `${paddedName} ${paddedQty} ${unit}`;
       })
       .join('\n');
 
-    const totalVal = (po.estimatedTotal || po.totalEstimatedAmount || 0).toFixed(2);
+    return `🛒 PURCHASE ORDER
 
-    return `*PURCHASE ORDER: ${po.poNumber}*\n*From:* ${storeName}\n*To:* ${vendorName}\n*Date:* ${new Date(
-      po.createdAt
-    ).toLocaleDateString()}\n\n*ITEMS REQUIRED:*\n${itemsText}\n\n*Total Estimated Value:* ${currencySymbol}${totalVal}\n\nPlease confirm availability, dispatch schedule, and invoice total.\n\nRegards,\n${storeName} Store Management`;
+${storeName.toUpperCase()}
+Vendor: ${vendorName.toUpperCase()}
+PO Number: ${po.poNumber}
+Date: ${poDate}
+
+ITEM                         QTY        UNIT
+------------------------------------------------
+${itemsTable}
+------------------------------------------------
+
+Please confirm receipt and delivery schedule.`;
   };
 
   const handleInitiateWhatsAppSend = async (po: PurchaseOrder) => {
@@ -348,21 +385,7 @@ export const PurchaseOrdersView: React.FC = () => {
       return;
     }
 
-    // Open modal immediately in generating state
-    setWhatsappModal({
-      isOpen: true,
-      po,
-      vendorPhone: phone,
-      messageText: `Purchase Order ${po.poNumber} • ${po.vendorName}`,
-      isSending: false,
-      isNotConnected: false,
-      errorMessage: '',
-      imageUrl: null,
-      imageBlob: null,
-      imageFilename: '',
-      isGeneratingImage: true,
-      shareSuccessMessage: '',
-    });
+    const messageText = generateWhatsAppMessage(po, po.vendorName);
 
     // Check official WhatsApp Cloud API connection status in background
     let isConnected = false;
@@ -373,111 +396,65 @@ export const PurchaseOrdersView: React.FC = () => {
       console.warn('Failed to verify WhatsApp connection status:', e);
     }
 
-    // Generate the dynamic Excel-style Purchase Order image
-    try {
-      const { blob, dataUrl, filename } = await generateClientPoImage(
-        po,
-        activeRestaurant?.name || 'Restaurant Store Control'
-      );
-
-      setWhatsappModal((prev) => ({
-        ...prev,
-        imageUrl: dataUrl,
-        imageBlob: blob,
-        imageFilename: filename,
-        isGeneratingImage: false,
-        isNotConnected: !isConnected,
-      }));
-    } catch (imgErr: any) {
-      console.error('Failed to generate Excel-style PO image:', imgErr);
-      setWhatsappModal((prev) => ({
-        ...prev,
-        isGeneratingImage: false,
-        isNotConnected: !isConnected,
-        errorMessage: 'Failed to generate Excel-style PO image. Please try again.',
-      }));
-    }
+    setWhatsappModal({
+      isOpen: true,
+      po,
+      vendorPhone: phone,
+      messageText,
+      isSending: false,
+      isNotConnected: !isConnected,
+      errorMessage: '',
+      successMessage: '',
+    });
   };
 
-  /**
-   * Manual WhatsApp Mode: Native device share or download + direct WhatsApp open
-   * Never fakes SENT or DELIVERED status.
-   */
-  const handleManualWhatsAppShare = async () => {
-    if (!whatsappModal.po || !whatsappModal.imageBlob) return;
-    const po = whatsappModal.po;
+  const handleOpenInWhatsAppManual = async () => {
+    if (!whatsappModal.po) return;
     const phone = whatsappModal.vendorPhone;
     const cleanDigits = phone.replace(/[^0-9]/g, '');
-    const filename = whatsappModal.imageFilename || `PO_${po.poNumber}.png`;
+    const encodedText = encodeURIComponent(whatsappModal.messageText);
+    const waUrl = cleanDigits
+      ? `https://wa.me/${cleanDigits}?text=${encodedText}`
+      : `https://wa.me/?text=${encodedText}`;
+    window.open(waUrl, '_blank', 'noopener,noreferrer');
 
-    try {
-      const file = new File([whatsappModal.imageBlob], filename, { type: 'image/png' });
+    // Also update PO status in Firestore to SENT so user can immediately receive the order
+    if (activeRestaurantId && whatsappModal.po.id) {
+      try {
+        await updatePurchaseOrderStatus(
+          activeRestaurantId,
+          whatsappModal.po.id,
+          'SENT',
+          user?.uid || 'system',
+          userProfile?.name || 'Staff User',
+          {
+            vendorPhone: whatsappModal.vendorPhone,
+            whatsappSessionInfo: 'Order opened via WhatsApp Web / App',
+          }
+        );
 
-      // Check if browser supports Web Share API with files (Android / iOS native sharing)
-      if (
-        typeof navigator !== 'undefined' &&
-        navigator.share &&
-        navigator.canShare &&
-        navigator.canShare({ files: [file] })
-      ) {
-        await navigator.share({
-          files: [file],
-          title: `Purchase Order ${po.poNumber}`,
-          text: `Purchase Order ${po.poNumber} from ${activeRestaurant?.name || 'Restaurant Store Control'}`,
-        });
-        setWhatsappModal((prev) => ({
-          ...prev,
-          shareSuccessMessage: 'Share dialog opened. Select WhatsApp to send the Excel order sheet directly to vendor.',
-        }));
-        return;
-      }
+        setOrders((prev) =>
+          prev.map((o) =>
+            o.id === whatsappModal.po!.id
+              ? {
+                  ...o,
+                  status: 'SENT',
+                  vendorPhone: whatsappModal.vendorPhone,
+                  sentAt: new Date().toISOString(),
+                }
+              : o
+          )
+        );
 
-      // Desktop or browser without file sharing support:
-      // 1. Download the generated Excel PO image automatically
-      const link = document.createElement('a');
-      link.href = whatsappModal.imageUrl || URL.createObjectURL(whatsappModal.imageBlob);
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+        if (statusFilter === 'DRAFT') {
+          setStatusFilter('ALL');
+        }
 
-      // 2. Open WhatsApp Web / App with order notice
-      const orderNote = encodeURIComponent(
-        `Hello ${po.vendorName},\nPlease find our Purchase Order #${po.poNumber} attached as an Excel-style sheet image.\nKindly confirm availability and delivery schedule.`
-      );
-      const waUrl = cleanDigits
-        ? `https://wa.me/${cleanDigits}?text=${orderNote}`
-        : `https://wa.me/?text=${orderNote}`;
-      window.open(waUrl, '_blank', 'noopener,noreferrer');
-
-      setWhatsappModal((prev) => ({
-        ...prev,
-        shareSuccessMessage: 'Excel order image downloaded! WhatsApp opened. Please attach the image and send to your vendor.',
-      }));
-    } catch (shareErr: any) {
-      if (shareErr.name !== 'AbortError') {
-        console.warn('Native share failed or canceled, falling back to download:', shareErr);
-        handleDownloadPoImage();
-        setWhatsappModal((prev) => ({
-          ...prev,
-          shareSuccessMessage: 'Excel order image downloaded to your device. You can attach it in WhatsApp.',
-        }));
+        setWhatsappModal((prev) => ({ ...prev, isOpen: false }));
+      } catch (manualErr) {
+        console.warn('Manual WhatsApp PO status update note:', manualErr);
       }
     }
-  };
-
-  /**
-   * Download the dynamically generated Excel-style PO image
-   */
-  const handleDownloadPoImage = () => {
-    if (!whatsappModal.imageBlob || !whatsappModal.imageUrl) return;
-    const filename = whatsappModal.imageFilename || `PO_${whatsappModal.po?.poNumber || 'order'}.png`;
-    const link = document.createElement('a');
-    link.href = whatsappModal.imageUrl;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
   };
 
   const handleExecuteWhatsAppSend = async () => {
@@ -487,37 +464,61 @@ export const PurchaseOrdersView: React.FC = () => {
     try {
       setWhatsappModal((prev) => ({ ...prev, isSending: true, errorMessage: '' }));
 
-      // Update PO status to PENDING_SEND before transmission
-      try {
-        await updatePurchaseOrderStatus(
-          activeRestaurantId,
-          targetPo.id,
-          'PENDING_SEND',
-          user?.uid || 'system',
-          userProfile?.name || 'Authorized User',
-          {
-            whatsappSessionInfo: `Transmitting Excel-style PO Image via official WhatsApp Cloud API...`,
-          }
-        );
-      } catch (statusErr) {
-        console.warn('Failed to set initial PENDING_SEND status:', statusErr);
-      }
-
       // Call dedicated WhatsApp backend server
       const res = await sendPoViaWhatsAppApi({
         restaurantId: activeRestaurantId,
         purchaseOrderId: targetPo.id,
         vendorId: targetPo.vendorId,
+        vendorPhone: whatsappModal.vendorPhone,
+        messageBody: whatsappModal.messageText,
+        po: targetPo,
         userUid: user?.uid || 'staff',
         userName: userProfile?.name || 'Staff User',
         userRole: activeRole || 'DEPARTMENT_STAFF',
       });
 
+      // Update PO status to SENT in Firestore (Source of Truth)
+      try {
+        await updatePurchaseOrderStatus(
+          activeRestaurantId,
+          targetPo.id,
+          'SENT',
+          user?.uid || 'system',
+          userProfile?.name || 'Authorized User',
+          {
+            whatsappMessageId: res.messageId,
+            vendorPhone: whatsappModal.vendorPhone,
+            whatsappSessionInfo: 'Order sent via official WhatsApp Business Cloud API',
+          }
+        );
+      } catch (statusErr) {
+        console.warn('Status update warning:', statusErr);
+      }
+
+      // Invalidate and update local state immediately so Receive Order button shows up right away
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.id === targetPo.id
+            ? {
+                ...o,
+                status: 'SENT',
+                whatsappMessageId: res.messageId,
+                vendorPhone: whatsappModal.vendorPhone,
+                sentAt: new Date().toISOString(),
+              }
+            : o
+        )
+      );
+
+      // If user is currently filtering by DRAFT, switch to ALL so the updated SENT order remains in view
+      if (statusFilter === 'DRAFT') {
+        setStatusFilter('ALL');
+      }
+
       setWhatsappModal((prev) => ({ ...prev, isOpen: false, isSending: false, errorMessage: '' }));
-      alert(`PO #${targetPo.poNumber} Excel sheet image successfully dispatched via official WhatsApp Cloud API! (Message ID: ${res.messageId})`);
+      alert(`PO #${targetPo.poNumber} successfully sent to vendor via WhatsApp! Status updated to SENT. You can now receive this order.`);
     } catch (err: any) {
       console.error('Failed to dispatch PO via WhatsApp Cloud API:', err);
-      // Status remains PENDING_SEND, show clear error to user, allow retry
       const errMsg = err.message || 'WhatsApp Cloud API dispatch failed. Please retry.';
       setWhatsappModal((prev) => ({
         ...prev,
@@ -813,7 +814,7 @@ export const PurchaseOrdersView: React.FC = () => {
   // Filtered orders list
   const filteredOrders = orders.filter((o) => {
     if (statusFilter === 'ALL') return true;
-    return o.status === statusFilter;
+    return normalizePurchaseOrderStatus(o.status ?? (o as any).poStatus ?? (o as any).orderStatus) === statusFilter;
   });
 
   const getStatusBadgeVariant = (status: PurchaseOrderStatus) => {
@@ -898,7 +899,7 @@ export const PurchaseOrdersView: React.FC = () => {
               const count =
                 st === 'ALL'
                   ? orders.length
-                  : orders.filter((o) => o.status === st).length;
+                  : orders.filter((o) => normalizePurchaseOrderStatus(o.status ?? (o as any).poStatus ?? (o as any).orderStatus) === st).length;
               return (
                 <button
                   key={st}
@@ -936,10 +937,12 @@ export const PurchaseOrdersView: React.FC = () => {
             const vendor = vendors.find((v) => v.id === po.vendorId);
             const vendorPhone = po.vendorPhone || vendor?.phone || vendor?.mobile;
             const totalEst = po.estimatedTotal || po.totalEstimatedAmount || 0;
+            const status = normalizePurchaseOrderStatus(po.status ?? (po as any).poStatus ?? (po as any).orderStatus);
 
             return (
               <div
                 key={po.id}
+                id={`po-card-${po.id}`}
                 className="bg-white rounded-xl border border-stone-200 p-5 shadow-2xs space-y-4 hover:border-stone-300 transition-colors"
               >
                 {/* PO Header Bar */}
@@ -955,33 +958,33 @@ export const PurchaseOrdersView: React.FC = () => {
                     {/* Status Badge */}
                     <span
                       className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
-                        po.status === 'SENT'
+                        status === 'SENT'
                           ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
-                          : po.status === 'RECEIVED'
+                          : status === 'RECEIVED'
                           ? 'bg-teal-100 text-teal-800 border border-teal-300'
-                          : po.status === 'PARTIALLY_RECEIVED'
+                          : status === 'PARTIALLY_RECEIVED'
                           ? 'bg-sky-100 text-sky-800 border border-sky-300'
-                          : po.status === 'PENDING_SEND'
+                          : status === 'PENDING_SEND'
                           ? 'bg-amber-100 text-amber-800 border border-amber-300'
-                          : po.status === 'CANCELLED'
+                          : status === 'CANCELLED'
                           ? 'bg-rose-100 text-rose-800 border border-rose-300'
                           : 'bg-stone-100 text-stone-700 border border-stone-200'
                       }`}
                     >
                       <span
                         className={`w-1.5 h-1.5 rounded-full ${
-                          po.status === 'SENT'
+                          status === 'SENT'
                             ? 'bg-emerald-600'
-                            : po.status === 'RECEIVED'
+                            : status === 'RECEIVED'
                             ? 'bg-teal-600'
-                            : po.status === 'PARTIALLY_RECEIVED'
+                            : status === 'PARTIALLY_RECEIVED'
                             ? 'bg-sky-600'
-                            : po.status === 'PENDING_SEND'
+                            : status === 'PENDING_SEND'
                             ? 'bg-amber-600'
                             : 'bg-stone-400'
                         }`}
                       />
-                      {po.status.replace(/_/g, ' ')}
+                      {status.replace(/_/g, ' ')}
                     </span>
 
                     {/* Vendor Contact pill */}
@@ -992,6 +995,7 @@ export const PurchaseOrdersView: React.FC = () => {
                       </span>
                     ) : (
                       <button
+                        id={`btn-add-phone-${po.id}`}
                         onClick={() =>
                           setPhoneModal({
                             isOpen: true,
@@ -1012,6 +1016,7 @@ export const PurchaseOrdersView: React.FC = () => {
                   <div className="flex flex-wrap items-center gap-2">
                     {/* PDF Export always available */}
                     <button
+                      id={`btn-pdf-${po.id}`}
                       onClick={() =>
                         exportPurchaseOrderPdf(
                           po,
@@ -1020,23 +1025,25 @@ export const PurchaseOrdersView: React.FC = () => {
                           activeRestaurant?.address
                         )
                       }
-                      className="flex items-center gap-1 px-2.5 py-1.5 text-xs border border-stone-200 hover:bg-stone-50 rounded-lg text-stone-700 font-medium transition-colors"
+                      className="flex items-center gap-1 px-2.5 py-1.5 text-xs border border-stone-200 hover:bg-stone-50 rounded-lg text-stone-700 font-medium transition-colors shrink-0"
                     >
                       <Printer className="w-3.5 h-3.5" /> Print / PDF
                     </button>
 
-                    {/* DRAFT actions */}
-                    {po.status === 'DRAFT' && (
+                    {/* DRAFT actions: show "WhatsApp Order" */}
+                    {status === 'DRAFT' && (
                       <>
                         <button
+                          id={`btn-whatsapp-order-${po.id}`}
                           onClick={() => handleInitiateWhatsAppSend(po)}
-                          className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold shadow-2xs transition-colors"
+                          className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold shadow-2xs transition-colors shrink-0"
                         >
                           <MessageSquare className="w-3.5 h-3.5" /> WhatsApp Order
                         </button>
                         <button
+                          id={`btn-cancel-po-${po.id}`}
                           onClick={() => handleCancelPo(po)}
-                          className="px-2 py-1.5 text-xs text-stone-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
+                          className="px-2 py-1.5 text-xs text-stone-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors shrink-0"
                           title="Cancel Order"
                         >
                           <Ban className="w-3.5 h-3.5" />
@@ -1044,51 +1051,49 @@ export const PurchaseOrdersView: React.FC = () => {
                       </>
                     )}
 
-                    {/* PENDING_SEND actions */}
-                    {po.status === 'PENDING_SEND' && (
-                      <>
-                        <button
-                          onClick={() => handleInitiateWhatsAppSend(po)}
-                          className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-semibold shadow-2xs transition-colors"
-                        >
-                          <RefreshCw className="w-3.5 h-3.5" /> WhatsApp Order
-                        </button>
-                        <button
-                          onClick={() => handleCancelPo(po)}
-                          className="px-2 py-1.5 text-xs text-stone-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
-                          title="Cancel Order"
-                        >
-                          <Ban className="w-3.5 h-3.5" />
-                        </button>
-                      </>
-                    )}
-
-                    {/* SENT actions */}
-                    {po.status === 'SENT' && (
+                    {/* PENDING_SEND actions: show "Sending..." / disabled button */}
+                    {status === 'PENDING_SEND' && (
                       <button
+                        id={`btn-sending-${po.id}`}
+                        disabled
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-amber-500/70 text-white rounded-lg font-semibold shadow-2xs opacity-80 cursor-not-allowed shrink-0"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Sending...
+                      </button>
+                    )}
+
+                    {/* SENT actions: show "Receive Order" */}
+                    {status === 'SENT' && (
+                      <button
+                        id={`btn-receive-order-${po.id}`}
                         onClick={() => openReceiveModal(po)}
-                        className="flex items-center gap-1 px-3.5 py-1.5 text-xs bg-teal-600 hover:bg-teal-700 text-white rounded-lg font-semibold shadow-2xs transition-colors"
+                        className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs bg-teal-600 hover:bg-teal-700 text-white rounded-lg font-semibold shadow-2xs transition-colors shrink-0"
                       >
                         <PackageCheck className="w-4 h-4" /> Receive Order
                       </button>
                     )}
 
-                    {/* PARTIALLY_RECEIVED actions */}
-                    {po.status === 'PARTIALLY_RECEIVED' && (
+                    {/* PARTIALLY_RECEIVED actions: show "Receive Order" */}
+                    {status === 'PARTIALLY_RECEIVED' && (
                       <button
+                        id={`btn-receive-order-partial-${po.id}`}
                         onClick={() => openReceiveModal(po)}
-                        className="flex items-center gap-1 px-3.5 py-1.5 text-xs bg-sky-600 hover:bg-sky-700 text-white rounded-lg font-semibold shadow-2xs transition-colors"
+                        className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs bg-sky-600 hover:bg-sky-700 text-white rounded-lg font-semibold shadow-2xs transition-colors shrink-0"
                       >
-                        <PackageCheck className="w-4 h-4" /> Receive Balance
+                        <PackageCheck className="w-4 h-4" /> Receive Order
                       </button>
                     )}
 
-                    {/* RECEIVED: view linked bill */}
-                    {po.status === 'RECEIVED' && po.billNumber && (
-                      <span className="inline-flex items-center gap-1 px-2.5 py-1 text-xs bg-teal-50 text-teal-800 rounded-lg font-medium border border-teal-200">
+                    {/* RECEIVED: show "View Receiving Details" */}
+                    {status === 'RECEIVED' && (
+                      <button
+                        id={`btn-view-receiving-${po.id}`}
+                        onClick={() => openReceiveModal(po)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-lg font-medium border border-stone-200 transition-colors shrink-0"
+                      >
                         <FileCheck className="w-3.5 h-3.5 text-teal-600" />
-                        Bill #{po.billNumber}
-                      </span>
+                        {po.billNumber ? `Bill #${po.billNumber} • View Details` : 'View Receiving Details'}
+                      </button>
                     )}
                   </div>
                 </div>
@@ -1100,7 +1105,7 @@ export const PurchaseOrdersView: React.FC = () => {
                       <tr>
                         <th className="py-2 px-2">Item</th>
                         <th className="py-2 px-2 text-right">Ordered Qty</th>
-                        {(po.status === 'RECEIVED' || po.status === 'PARTIALLY_RECEIVED') && (
+                        {(status === 'RECEIVED' || status === 'PARTIALLY_RECEIVED') && (
                           <>
                             <th className="py-2 px-2 text-right text-teal-700">Received</th>
                             <th className="py-2 px-2 text-right text-amber-700">Missing</th>
@@ -1367,14 +1372,14 @@ export const PurchaseOrdersView: React.FC = () => {
       </Modal>
 
       {/* ------------------------------------------------------------------- */}
-      {/* MODAL 3: EXCEL-STYLE PURCHASE ORDER IMAGE & WHATSAPP DISPATCH       */}
+      {/* MODAL 3: WHATSAPP ORDER DISPATCH (ONLY ITEM + QUANTITY + UNIT)       */}
       {/* ------------------------------------------------------------------- */}
       <Modal
         isOpen={whatsappModal.isOpen}
         onClose={() => setWhatsappModal((prev) => ({ ...prev, isOpen: false }))}
         title="WhatsApp Order"
-        subtitle={`Excel Order Sheet • ${whatsappModal.po?.poNumber || ''} • ${whatsappModal.po?.vendorName || ''}`}
-        maxWidth="2xl"
+        subtitle={`Purchase Order ${whatsappModal.po?.poNumber || ''} • ${whatsappModal.po?.vendorName || ''}`}
+        maxWidth="lg"
       >
         <div className="space-y-4 text-xs">
           {/* Vendor Details Banner */}
@@ -1398,7 +1403,7 @@ export const PurchaseOrdersView: React.FC = () => {
                   Automatic WhatsApp is not configured. Use Manual WhatsApp.
                 </p>
                 <p className="text-[11px] text-amber-800">
-                  Official Meta Cloud API is not connected. Use <strong>Share to WhatsApp</strong> or <strong>Download Image</strong> below to send the Excel-style order directly to the vendor from your device.
+                  Official WhatsApp Cloud API is not connected. Use <strong>Open in WhatsApp</strong> below to send the order message directly to the vendor from your device.
                 </p>
               </div>
             </div>
@@ -1410,7 +1415,7 @@ export const PurchaseOrdersView: React.FC = () => {
                   Official WhatsApp Cloud API Ready
                 </p>
                 <p className="text-[11px] text-emerald-800">
-                  The restaurant's verified WhatsApp Business Cloud API is active. You can dispatch the Excel order sheet automatically, or share manually from your device.
+                  Order message containing only items, quantities, and units will be sent directly to vendor's registered WhatsApp number.
                 </p>
               </div>
             </div>
@@ -1423,56 +1428,31 @@ export const PurchaseOrdersView: React.FC = () => {
               <div>
                 <p className="font-semibold text-xs">WhatsApp Dispatch Error:</p>
                 <p className="text-[11px] mt-0.5">{whatsappModal.errorMessage}</p>
-                <p className="text-[10px] text-stone-500 mt-1">
-                  You can retry automatic send or use manual device sharing below.
-                </p>
               </div>
             </div>
           )}
 
-          {/* Share/Success Banner */}
-          {whatsappModal.shareSuccessMessage && (
-            <div className="p-3 bg-teal-50 rounded-xl border border-teal-200 flex items-start gap-2 text-teal-800">
-              <CheckCircle2 className="w-4 h-4 text-teal-600 shrink-0 mt-0.5" />
-              <p className="text-[11px]">{whatsappModal.shareSuccessMessage}</p>
-            </div>
-          )}
-
-          {/* Excel-Style PO Image Preview Section */}
+          {/* Pure Text PO Message Preview (ITEM + QTY + UNIT ONLY • NO PRICES) */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <label className="text-xs font-bold text-stone-700 uppercase tracking-wider flex items-center gap-1.5">
-                <ImageIcon className="w-3.5 h-3.5 text-emerald-600" />
-                Excel-Style PO Image Preview (PNG)
+                <MessageSquare className="w-3.5 h-3.5 text-emerald-600" />
+                WhatsApp Message (Item + Qty + Unit only)
               </label>
               <span className="text-[10px] font-semibold text-stone-500 bg-stone-100 px-2 py-0.5 rounded">
-                {whatsappModal.po?.items?.length || 0} ITEMS • NO CROPPING
+                {whatsappModal.po?.items?.length || 0} ITEMS • NO PRICES
               </span>
             </div>
 
-            <div className="p-3 bg-stone-100 border border-stone-200 rounded-xl min-h-[200px] max-h-[380px] overflow-y-auto flex items-center justify-center">
-              {whatsappModal.isGeneratingImage ? (
-                <div className="flex flex-col items-center gap-2 text-stone-500 py-8">
-                  <RefreshCw className="w-6 h-6 animate-spin text-emerald-600" />
-                  <p className="text-xs font-medium">Generating Excel-style order sheet image...</p>
-                  <p className="text-[10px] text-stone-400">Rendering high-resolution table with exact items & quantities</p>
-                </div>
-              ) : whatsappModal.imageUrl ? (
-                <img
-                  src={whatsappModal.imageUrl}
-                  alt={`Purchase Order ${whatsappModal.po?.poNumber}`}
-                  className="max-w-full h-auto rounded shadow-sm border border-stone-300"
-                />
-              ) : (
-                <div className="text-stone-400 text-xs">Image preview not available</div>
-              )}
+            <div className="p-4 bg-stone-900 text-emerald-400 font-mono text-[11px] rounded-xl border border-stone-800 whitespace-pre overflow-x-auto max-h-72 select-text leading-relaxed shadow-inner">
+              {whatsappModal.messageText}
             </div>
             <p className="text-[10px] text-stone-500 italic">
-              * High-resolution spreadsheet image formatted specifically for mobile and WhatsApp readability.
+              * Rates, amounts, and totals are strictly excluded from the WhatsApp order.
             </p>
           </div>
 
-          {/* Action Buttons: Cancel, Download Image, Share to WhatsApp, and Automatic Cloud API */}
+          {/* Action Buttons: Cancel, Open in WhatsApp, Send WhatsApp Order */}
           <div className="pt-3 border-t border-stone-200 flex flex-wrap items-center justify-between gap-2">
             <button
               type="button"
@@ -1483,45 +1463,33 @@ export const PurchaseOrdersView: React.FC = () => {
             </button>
 
             <div className="flex flex-wrap items-center gap-2">
-              {/* Button 2: Download Image */}
+              {/* Fallback / Manual Open in WhatsApp */}
               <button
                 type="button"
-                disabled={whatsappModal.isGeneratingImage || !whatsappModal.imageUrl}
-                onClick={handleDownloadPoImage}
-                className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-stone-700 bg-white border border-stone-300 hover:bg-stone-50 rounded-lg shadow-2xs disabled:opacity-50 transition-colors"
+                onClick={handleOpenInWhatsAppManual}
+                className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-stone-700 bg-white border border-stone-300 hover:bg-stone-50 rounded-lg shadow-2xs transition-colors"
               >
-                <Download className="w-3.5 h-3.5" />
-                Download Image
+                <MessageSquare className="w-3.5 h-3.5 text-emerald-600" />
+                Open in WhatsApp
               </button>
 
-              {/* Button 1: Share to WhatsApp (Manual device share) */}
-              <button
-                type="button"
-                disabled={whatsappModal.isGeneratingImage || !whatsappModal.imageUrl}
-                onClick={handleManualWhatsAppShare}
-                className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-2xs disabled:opacity-50 transition-colors"
-              >
-                <Share2 className="w-3.5 h-3.5" />
-                Share to WhatsApp
-              </button>
-
-              {/* Automatic Mode: Send via Cloud API (if configured) */}
+              {/* Automatic Mode: Send via Cloud API */}
               {!whatsappModal.isNotConnected && (
                 <button
                   type="button"
-                  disabled={whatsappModal.isSending || whatsappModal.isGeneratingImage}
+                  disabled={whatsappModal.isSending}
                   onClick={handleExecuteWhatsAppSend}
-                  className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 rounded-lg shadow-2xs disabled:opacity-50 transition-colors"
+                  className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-2xs disabled:opacity-50 transition-colors"
                 >
                   {whatsappModal.isSending ? (
                     <>
                       <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                      Transmitting via Cloud API...
+                      Sending WhatsApp Order...
                     </>
                   ) : (
                     <>
                       <Send className="w-3.5 h-3.5" />
-                      Send via Cloud API (Automatic)
+                      Send WhatsApp Order
                     </>
                   )}
                 </button>

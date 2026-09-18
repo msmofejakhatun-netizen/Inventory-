@@ -150,6 +150,7 @@ export const SettingsView: React.FC = () => {
     authorizations.forEach((a) => {
       const emailKey = a.email.trim().toLowerCase();
       const existing = map.get(emailKey);
+      const isAuthActive = a.status === 'ACTIVE' && a.accountStatus !== 'SUSPENDED';
       if (!existing) {
         map.set(emailKey, {
           id: a.id,
@@ -160,15 +161,18 @@ export const SettingsView: React.FC = () => {
           role: a.role,
           departmentId: a.departmentId || null,
           departmentName: a.departmentName || null,
-          status:
-            a.status === 'INACTIVE' || a.accountStatus === 'SUSPENDED'
-              ? 'INACTIVE'
-              : 'ACTIVE',
+          status: isAuthActive ? 'ACTIVE' : 'INACTIVE',
           isOwner: a.role === 'OWNER',
         });
       } else {
         if (!existing.authorizationId) {
           existing.authorizationId = a.id;
+        }
+        if (isAuthActive) {
+          existing.status = 'ACTIVE';
+          existing.role = a.role;
+          if (a.departmentId !== undefined) existing.departmentId = a.departmentId;
+          if (a.departmentName !== undefined) existing.departmentName = a.departmentName;
         }
       }
     });
@@ -284,20 +288,22 @@ export const SettingsView: React.FC = () => {
         return;
       }
 
-      setMemberSuccess('Team member added successfully.');
       setMemberEmail('');
       setMemberName('');
       setMemberRole('DEPARTMENT_STAFF');
       setMemberDeptId('');
-
-      setTimeout(() => {
-        setIsMemberModalOpen(false);
-        setMemberSuccess(null);
-        setMemberError(null);
-      }, 1000);
-    } catch (err) {
-      console.error('[handleAddTeamMember] Error authorizing team member:', err);
-      setMemberError('Unable to add team member. Please try again.');
+      setIsMemberModalOpen(false);
+      setMemberSuccess(null);
+      setMemberError(null);
+    } catch (err: any) {
+      console.error('[handleAddTeamMember] Error authorizing team member:', {
+        code: err?.code,
+        message: err?.message,
+        operation: 'addActiveTeamMember',
+        path: `restaurants/${activeRestaurantId}/authorizations`,
+        error: err,
+      });
+      setMemberError(err?.message || 'Unable to add team member. Please try again.');
     } finally {
       setMemberSaving(false);
     }

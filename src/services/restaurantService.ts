@@ -1259,6 +1259,8 @@ export async function updatePurchaseOrderStatus(
   extraData?: {
     sentAt?: string;
     whatsappSessionInfo?: string;
+    whatsappMessageId?: string;
+    vendorPhone?: string;
     cancelReason?: string;
   }
 ): Promise<void> {
@@ -1276,6 +1278,12 @@ export async function updatePurchaseOrderStatus(
       updates.sentByName = actorName;
       if (extraData?.whatsappSessionInfo) {
         updates.whatsappSessionInfo = extraData.whatsappSessionInfo;
+      }
+      if (extraData?.whatsappMessageId) {
+        updates.whatsappMessageId = extraData.whatsappMessageId;
+      }
+      if (extraData?.vendorPhone) {
+        updates.vendorPhone = extraData.vendorPhone;
       }
     }
 
@@ -1724,23 +1732,27 @@ export async function addActiveTeamMember(
   }
 
   try {
-    // 1. Check if user already exists as an active member in this restaurant
+    // 1. Check if user already exists as an active member in this restaurant's users subcollection
     const usersColRef = collection(db, 'restaurants', restaurantId, 'users');
     const existingUsersSnap = await getDocs(usersColRef);
-    const alreadyMember = existingUsersSnap.docs.some((d) => {
+    const existingUserDoc = existingUsersSnap.docs.find((d) => {
       const u = d.data() as RestaurantUser;
-      return (
-        Boolean(u.email && u.email.trim().toLowerCase() === normalizedEmail) &&
-        u.status !== 'inactive' &&
-        u.status !== 'INACTIVE'
-      );
+      return Boolean(u.email && u.email.trim().toLowerCase() === normalizedEmail);
     });
 
-    if (alreadyMember) {
-      return {
-        success: false,
-        error: 'Team member already exists.',
-      };
+    if (existingUserDoc) {
+      const u = existingUserDoc.data() as RestaurantUser;
+      const isAlreadyActive =
+        u.status !== 'inactive' &&
+        u.status !== 'INACTIVE' &&
+        u.accountStatus !== 'SUSPENDED';
+
+      if (isAlreadyActive) {
+        return {
+          success: false,
+          error: 'This email is already an active team member.',
+        };
+      }
     }
 
     // 2. Check if active authorization already exists in authorizations subcollection
@@ -1751,17 +1763,23 @@ export async function addActiveTeamMember(
 
     const activeAuthDoc = existingAuthSnap.docs.find((d) => {
       const a = d.data() as StaffAuthorization;
-      return a.status === 'ACTIVE';
+      return a.status === 'ACTIVE' && a.accountStatus !== 'SUSPENDED';
     });
 
     if (activeAuthDoc) {
       return {
         success: false,
-        error: 'Team member already exists.',
+        error: 'This email is already an active team member.',
       };
     }
 
-    // 3. Check for any legacy PENDING invitation and migrate it directly to ACTIVE
+    // 3. Check for any non-active authorization (PENDING, PENDING_ACTIVATION, INACTIVE) to update instead of creating duplicate
+    const existingNonActiveAuthDoc = existingAuthSnap.docs.find((d) => {
+      const a = d.data() as StaffAuthorization;
+      return a.status !== 'ACTIVE' || a.accountStatus === 'SUSPENDED';
+    });
+
+    // Check for any legacy PENDING invitation and migrate it directly to ACTIVE
     const invColRef = collection(db, 'restaurants', restaurantId, 'invitations');
     const existingInvSnap = await getDocs(
       query(invColRef, where('email', '==', normalizedEmail))
@@ -1774,11 +1792,22 @@ export async function addActiveTeamMember(
     const now = new Date().toISOString();
     const batch = writeBatch(db);
 
-    // Reuse existing doc ID if migrating from pending invitation, or generate new ID
-    const authRef = legacyPendingInv ? doc(authColRef, legacyPendingInv.id) : doc(authColRef);
+    // Reuse existing doc if updating non-active authorization, migrating legacy invitation, or create new doc
+    const targetAuthRef = existingNonActiveAuthDoc
+      ? existingNonActiveAuthDoc.ref
+      : legacyPendingInv
+      ? doc(authColRef, legacyPendingInv.id)
+      : doc(authColRef);
+
+    // If an existing real UID is already known for this user in this restaurant, preserve/attach it.
+    // Otherwise, DO NOT invent a fake UID - leave attachedUid null so real UID attaches upon login.
+    const realUid =
+      existingUserDoc?.id ||
+      (existingNonActiveAuthDoc?.data() as StaffAuthorization | undefined)?.attachedUid ||
+      null;
 
     const authData: StaffAuthorization = {
-      id: authRef.id,
+      id: targetAuthRef.id,
       restaurantId,
       restaurantName: restaurantName || 'Restaurant',
       email: normalizedEmail,
@@ -1792,6 +1821,7 @@ export async function addActiveTeamMember(
       authorizedByName: caller.name || 'Authorized Manager',
       authorizedByRole: caller.role,
       authorizedAt: now,
+      ...(realUid ? { attachedUid: realUid } : {}),
     };
 
     // If migrating legacy invitation, mark the legacy record as ACCEPTED / migrated
@@ -1803,48 +1833,26 @@ export async function addActiveTeamMember(
       });
     }
 
-    // 4. Check if a user with this email has already registered an account in root users
-    const rootUserQuery = query(collection(db, 'users'), where('email', '==', normalizedEmail), limit(1));
-    const rootUserSnap = await getDocs(rootUserQuery);
-
-    if (!rootUserSnap.empty) {
-      const registeredUserDoc = rootUserSnap.docs[0];
-      const registeredUid = registeredUserDoc.id;
-      authData.attachedUid = registeredUid;
-
-      // Link directly into restaurant users subcollection with ACTIVE status
-      const userMemberRef = doc(db, 'restaurants', restaurantId, 'users', registeredUid);
-      const newMember: RestaurantUser = {
-        uid: registeredUid,
+    // If an inactive restaurant user doc exists, reactivate them directly with their real UID
+    if (existingUserDoc) {
+      batch.update(existingUserDoc.ref, {
         name: fullName,
-        email: normalizedEmail,
         role: params.role,
         departmentId: params.departmentId || null,
         departmentName: params.departmentName || null,
-        restaurantId,
         status: 'ACTIVE',
         accountStatus: 'ACTIVE',
         authorizedByUid: caller.uid,
         authorizedByName: caller.name || 'Authorized Manager',
         authorizedAt: now,
-        authorizationId: authRef.id,
-        createdAt: now,
-      };
-      batch.set(userMemberRef, newMember);
-
-      // Append restaurant to root user profile
-      batch.set(
-        registeredUserDoc.ref,
-        {
-          restaurantIds: arrayUnion(restaurantId),
-        },
-        { merge: true }
-      );
+        authorizationId: targetAuthRef.id,
+      });
     }
 
-    batch.set(authRef, authData);
+    // Write the active staff authorization document
+    batch.set(targetAuthRef, authData, { merge: true });
 
-    // 5. Immutable Audit Log (TEAM_MEMBER_CREATED)
+    // 4. Immutable Audit Log (TEAM_MEMBER_CREATED)
     const auditRef = doc(collection(db, 'restaurants', restaurantId, 'auditLogs'));
     const auditData: AuditLog = {
       id: auditRef.id,
@@ -1853,7 +1861,7 @@ export async function addActiveTeamMember(
       actorRole: caller.role,
       action: 'TEAM_MEMBER_CREATED',
       entity: 'TeamMember',
-      entityId: authRef.id,
+      entityId: targetAuthRef.id,
       details: `Team member ${fullName} (${normalizedEmail}) authorized with role ${params.role}${
         params.departmentName ? ` in ${params.departmentName}` : ''
       }`,
@@ -1866,12 +1874,18 @@ export async function addActiveTeamMember(
     batch.set(auditRef, auditData);
 
     await batch.commit();
-    return { success: true, memberId: authRef.id };
-  } catch (err) {
-    console.error('[addActiveTeamMember] Technical diagnostic error:', err);
+    return { success: true, memberId: targetAuthRef.id };
+  } catch (err: any) {
+    console.error('[addActiveTeamMember] Technical diagnostic error:', {
+      code: err?.code,
+      message: err?.message,
+      operation: 'Firestore batch write to authorizations and auditLogs',
+      path: `restaurants/${restaurantId}/authorizations`,
+      error: err,
+    });
     return {
       success: false,
-      error: 'Unable to add team member. Please try again.',
+      error: err?.message || 'Unable to add team member. Please try again.',
     };
   }
 }

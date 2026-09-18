@@ -211,7 +211,8 @@ service cloud.firestore {
       // Vendors Master
       match /vendors/{vendorId} {
         allow get, list: if isMemberOfRestaurant(restaurantId);
-        allow create, update, delete: if isRestaurantManager(restaurantId);
+        allow create, delete: if isRestaurantManager(restaurantId);
+        allow update: if isRestaurantManager(restaurantId) || isStorekeeper(restaurantId);
       }
 
       // Purchases & Inward Goods
@@ -267,7 +268,9 @@ service cloud.firestore {
       match /purchaseOrders/{poId} {
         allow get, list: if isMemberOfRestaurant(restaurantId);
         allow create, update: if isStorekeeper(restaurantId);
-        allow delete: if isRestaurantOwner(restaurantId);
+        allow delete: if isRestaurantOwner(restaurantId) || (
+          isStorekeeper(restaurantId) && resource.data.status == 'DRAFT'
+        );
       }
 
       // Notifications

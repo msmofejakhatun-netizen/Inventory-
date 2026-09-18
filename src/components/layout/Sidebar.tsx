@@ -83,7 +83,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       title: 'Procurement & Vendors',
       items: [
         { id: 'purchases', label: 'Purchases (Inward)', icon: ShoppingCart, allowedRoles: ['OWNER', 'MANAGER', 'STOREKEEPER'] },
-        { id: 'purchase_orders', label: 'Purchase Orders (PO)', icon: FileSpreadsheet, allowedRoles: ['OWNER', 'MANAGER'] },
+        { id: 'purchase_orders', label: 'Purchase Orders (PO)', icon: FileSpreadsheet, allowedRoles: ['OWNER', 'MANAGER', 'STOREKEEPER'] },
         { id: 'vendors', label: 'Vendors Master', icon: Building2, allowedRoles: ['OWNER', 'MANAGER'] },
         { id: 'vendor_payments', label: 'Vendor Payments', icon: CreditCard, allowedRoles: ['OWNER', 'MANAGER'] },
       ],

@@ -213,62 +213,45 @@ export function normalizePhoneNumber(rawPhone: string): string {
 }
 
 /**
- * Generates exact professional PO message matching specification:
- * Purchase Order
- * Restaurant: {restaurantName}
- * PO Number: {poNumber}
- * Date: {date}
- * Vendor: {vendorName}
- * Items:
- * 1. Rice
- * Qty: 25 Kg
- * Estimated Rate: ₹140
- * Estimated Amount: ₹3,500
- * ...
+ * Generates exact WhatsApp PO message containing ONLY ITEM + QUANTITY + UNIT.
+ * Completely excludes Rate, Amount, Total, Value, or ₹ currency info.
  */
 export function generatePoMessageText(
   po: PurchaseOrder,
   restaurantName: string,
-  vendorName: string,
-  currencySymbol = '₹'
+  vendorName: string
 ): string {
-  const poDate = po.createdAt ? new Date(po.createdAt).toLocaleDateString('en-IN') : new Date().toLocaleDateString('en-IN');
+  const poDate = po.createdAt
+    ? new Date(po.createdAt).toLocaleDateString('en-IN')
+    : new Date().toLocaleDateString('en-IN');
 
-  let itemsText = '';
-  po.items.forEach((item, index) => {
-    const qty = item.orderedQty ?? item.recommendedQuantity ?? 0;
-    const rate = item.estimatedRate ?? 0;
-    const amount = Number((qty * rate).toFixed(2));
-    itemsText += `${index + 1}. ${item.itemName}\nQty: ${qty} ${item.unit}\nEstimated Rate: ${currencySymbol}${rate.toLocaleString()}\nEstimated Amount: ${currencySymbol}${amount.toLocaleString()}\n\n`;
-  });
+  const items = po.items || [];
 
-  const total = (po.estimatedTotal ?? po.totalEstimatedAmount ?? 0).toLocaleString();
+  const itemsTable = items
+    .map((item) => {
+      const name = (item.itemName || 'ITEM').toUpperCase().trim();
+      const qty = item.orderedQty ?? item.recommendedQuantity ?? 0;
+      const unit = (item.unit || 'UNIT').toUpperCase().trim();
 
-  return `Purchase Order
+      const paddedName = name.padEnd(28, ' ');
+      const paddedQty = String(qty).padEnd(10, ' ');
+      return `${paddedName} ${paddedQty} ${unit}`;
+    })
+    .join('\n');
 
-Restaurant:
-${restaurantName}
+  return `🛒 PURCHASE ORDER
 
-PO Number:
-${po.poNumber}
+${(restaurantName || 'RESTAURANT STORE').toUpperCase()}
+Vendor: ${(vendorName || 'SUPPLIER').toUpperCase()}
+PO Number: ${po.poNumber}
+Date: ${poDate}
 
-Date:
-${poDate}
+ITEM                         QTY        UNIT
+------------------------------------------------
+${itemsTable}
+------------------------------------------------
 
-Vendor:
-${vendorName}
-
-Items:
-
-${itemsText.trim()}
-
-Total Estimated Amount:
-${currencySymbol}${total}
-
-Please confirm availability and expected delivery.
-
-Regards,
-${restaurantName}`;
+Please confirm receipt and delivery schedule.`;
 }
 
 /**

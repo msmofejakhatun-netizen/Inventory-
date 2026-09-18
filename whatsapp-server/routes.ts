@@ -315,7 +315,16 @@ whatsappRouter.get('/po-image/:restaurantId/:purchaseOrderId.png', async (req: R
  */
 whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
   try {
-    const { restaurantId, purchaseOrderId, userUid, userName, userRole } = req.body;
+    const {
+      restaurantId,
+      purchaseOrderId,
+      userUid,
+      userName,
+      userRole,
+      vendorPhone: bodyVendorPhone,
+      messageBody: bodyMessageBody,
+      po: bodyPo,
+    } = req.body;
 
     if (!restaurantId || !purchaseOrderId) {
       return res.status(400).json({ error: 'restaurantId and purchaseOrderId are required' });
@@ -339,21 +348,35 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
     }
 
     // Fetch PO
+    let po: PurchaseOrder | undefined = bodyPo;
     const poRef = doc(db, 'restaurants', restaurantId, 'purchaseOrders', purchaseOrderId);
-    const poSnap = await getDoc(poRef);
-    if (!poSnap.exists()) {
+    if (!po) {
+      try {
+        const poSnap = await getDoc(poRef);
+        if (poSnap.exists()) {
+          po = poSnap.data() as PurchaseOrder;
+        }
+      } catch (poErr) {
+        console.warn('Could not fetch PO from server-side Firestore:', poErr);
+      }
+    }
+
+    if (!po) {
       return res.status(404).json({ error: 'Purchase Order not found' });
     }
-    const po = poSnap.data() as PurchaseOrder;
 
     // Fetch Vendor to get / verify phone
-    let rawPhone = po.vendorPhone || '';
+    let rawPhone = bodyVendorPhone || po.vendorPhone || '';
     if (!rawPhone && po.vendorId) {
-      const vendorRef = doc(db, 'restaurants', restaurantId, 'vendors', po.vendorId);
-      const vendorSnap = await getDoc(vendorRef);
-      if (vendorSnap.exists()) {
-        const vendor = vendorSnap.data() as Vendor;
-        rawPhone = vendor.phone || vendor.mobile || '';
+      try {
+        const vendorRef = doc(db, 'restaurants', restaurantId, 'vendors', po.vendorId);
+        const vendorSnap = await getDoc(vendorRef);
+        if (vendorSnap.exists()) {
+          const vendor = vendorSnap.data() as Vendor;
+          rawPhone = vendor.phone || vendor.mobile || '';
+        }
+      } catch (vErr) {
+        console.warn('Could not fetch vendor phone:', vErr);
       }
     }
 
@@ -375,50 +398,41 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
     }
 
     // Fetch restaurant name
-    const restDocRef = doc(db, 'restaurants', restaurantId);
-    const restSnap = await getDoc(restDocRef);
-    const restaurant = restSnap.data() as Restaurant | undefined;
-    const restaurantName = restaurant?.name || 'Restaurant Store Control';
+    let restaurantName = 'Restaurant Store Control';
+    try {
+      const restDocRef = doc(db, 'restaurants', restaurantId);
+      const restSnap = await getDoc(restDocRef);
+      const restaurant = restSnap.data() as Restaurant | undefined;
+      if (restaurant?.name) restaurantName = restaurant.name;
+    } catch (rErr) {
+      console.warn('Could not fetch restaurant name:', rErr);
+    }
 
-    // Generate high-resolution Excel-style PO image buffer
-    const { buffer: imageBuffer, filename: imageFilename } = generateServerPoImageBuffer(
-      po,
-      restaurantName
-    );
+    // Generate dynamic WhatsApp PO text containing ONLY ITEM + QUANTITY + UNIT (NO prices/amounts/rates/totals)
+    const messageBody = bodyMessageBody || generatePoMessageText(po, restaurantName, po.vendorName);
 
     // Record pre-send audit
-    await recordWhatsAppAuditLog({
-      restaurantId,
-      actorUid: userUid || 'system',
-      actorName: userName || 'Staff',
-      action: 'PO_WHATSAPP_SEND_REQUESTED',
-      entityId: po.id,
-      details: `Initiating official WhatsApp Cloud API image dispatch for PO #${po.poNumber} to ${normalizedPhone}`,
-    });
-
-    // Send Image via Meta Cloud API
-    let metaResult;
-    let uploadedMediaId: string | undefined;
-    const caption = `Purchase Order ${po.poNumber}\n${restaurantName}\nSupplier: ${po.vendorName}\nPlease confirm receipt and delivery schedule.`;
-
     try {
-      // 1. Upload Excel-style PO image to Meta Media
-      const uploadData = await uploadMetaMedia({
-        phoneNumberId: config.phoneNumberId,
-        accessToken: token,
-        buffer: imageBuffer,
-        filename: imageFilename,
-        mimeType: 'image/png',
+      await recordWhatsAppAuditLog({
+        restaurantId,
+        actorUid: userUid || 'system',
+        actorName: userName || 'Staff',
+        action: 'PO_WHATSAPP_SEND_REQUESTED',
+        entityId: po.id,
+        details: `Initiating official WhatsApp Cloud API text dispatch for PO #${po.poNumber} to ${normalizedPhone}`,
       });
-      uploadedMediaId = uploadData.mediaId;
+    } catch (auditErr) {
+      console.warn('Could not record pre-send audit log:', auditErr);
+    }
 
-      // 2. Dispatch official image message
-      metaResult = await sendMetaCloudApiImageMessage({
+    // Send Text Message via Meta Cloud API
+    let metaResult;
+    try {
+      metaResult = await sendMetaCloudApiMessage({
         phoneNumberId: config.phoneNumberId,
         accessToken: token,
         to: normalizedPhone,
-        mediaId: uploadedMediaId,
-        caption,
+        body: messageBody,
       });
     } catch (apiErr) {
       const errMsg = apiErr instanceof Error ? apiErr.message : String(apiErr);
@@ -435,8 +449,8 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
         vendorPhone: normalizedPhone,
         messageId: failedMsgId,
         status: 'FAILED',
-        mediaType: 'image',
-        messageBody: caption,
+        mediaType: 'text',
+        messageBody,
         createdAt: new Date().toISOString(),
         failedAt: new Date().toISOString(),
         errorMessage: errMsg,
@@ -453,7 +467,7 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
         actorName: userName || 'Staff',
         action: 'PO_WHATSAPP_FAILED',
         entityId: po.id,
-        details: `Failed to dispatch Excel-style PO #${po.poNumber} image via WhatsApp: ${errMsg}`,
+        details: `Failed to dispatch PO #${po.poNumber} via WhatsApp: ${errMsg}`,
       });
 
       return res.status(502).json({
@@ -476,44 +490,46 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
       vendorPhone: normalizedPhone,
       messageId,
       status: 'SENT',
-      mediaType: 'image',
-      mediaId: uploadedMediaId,
-      imageUrl: `/api/whatsapp/po-image/${restaurantId}/${po.id}.png`,
-      messageBody: caption,
+      mediaType: 'text',
+      messageBody,
       createdAt: now,
       sentAt: now,
       sentByUid: userUid,
       sentByName: userName,
     };
 
-    const msgDocRef = doc(db, 'restaurants', restaurantId, 'whatsappMessages', messageId);
-    await setDoc(msgDocRef, messageRecord);
+    try {
+      const msgDocRef = doc(db, 'restaurants', restaurantId, 'whatsappMessages', messageId);
+      await setDoc(msgDocRef, messageRecord);
 
-    // Update PO in Firestore
-    await updateDoc(poRef, {
-      status: 'SENT',
-      sentAt: now,
-      sentByUid: userUid || 'system',
-      sentByName: userName || 'Staff',
-      whatsappMessageId: messageId,
-      vendorPhone: normalizedPhone,
-      whatsappSessionInfo: 'Excel-style PO Image dispatched via official Meta Cloud API',
-      updatedAt: now,
-    });
+      // Update PO in Firestore
+      await updateDoc(poRef, {
+        status: 'SENT',
+        sentAt: now,
+        sentByUid: userUid || 'system',
+        sentByName: userName || 'Staff',
+        whatsappMessageId: messageId,
+        vendorPhone: normalizedPhone,
+        whatsappSessionInfo: 'Order dispatched via official WhatsApp Business Cloud API',
+        updatedAt: now,
+      });
 
-    // Update last successful message timestamp in settings
-    await saveRestaurantWhatsAppConfig(restaurantId, {
-      lastSuccessfulMessageAt: now,
-    });
+      // Update last successful message timestamp in settings
+      await saveRestaurantWhatsAppConfig(restaurantId, {
+        lastSuccessfulMessageAt: now,
+      });
 
-    await recordWhatsAppAuditLog({
-      restaurantId,
-      actorUid: userUid || 'system',
-      actorName: userName || 'Staff',
-      action: 'PO_WHATSAPP_SENT',
-      entityId: po.id,
-      details: `Successfully dispatched Excel-style PO #${po.poNumber} image via WhatsApp Cloud API (Message ID: ${messageId}) to ${normalizedPhone}`,
-    });
+      await recordWhatsAppAuditLog({
+        restaurantId,
+        actorUid: userUid || 'system',
+        actorName: userName || 'Staff',
+        action: 'PO_WHATSAPP_SENT',
+        entityId: po.id,
+        details: `Successfully dispatched PO #${po.poNumber} text order via WhatsApp Cloud API (Message ID: ${messageId}) to ${normalizedPhone}`,
+      });
+    } catch (fsErr) {
+      console.warn('Server-side Firestore writes note (client will also persist to Firestore):', fsErr);
+    }
 
     return res.json({
       success: true,

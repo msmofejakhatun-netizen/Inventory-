@@ -70,6 +70,9 @@ export async function sendPoViaWhatsAppApi(payload: {
   restaurantId: string;
   purchaseOrderId: string;
   vendorId?: string;
+  vendorPhone?: string;
+  messageBody?: string;
+  po?: import('../types').PurchaseOrder;
   userUid: string;
   userName: string;
   userRole: string;
