@@ -16,6 +16,8 @@ import {
   normalizePhoneNumber,
   generatePoMessageText,
   sendMetaCloudApiMessage,
+  uploadMetaMedia,
+  sendMetaCloudApiImageMessage,
   verifyMetaCredentials,
   recordWhatsAppAuditLog,
   getRestaurantWhatsAppConfig,
@@ -29,6 +31,7 @@ import {
 } from './whatsappService';
 import { PurchaseOrder, Vendor, Restaurant } from '../src/types';
 import { WhatsAppMessageRecord } from './types';
+import { generateServerPoImageBuffer } from './excelPoImageServer';
 
 export const whatsappRouter = Router();
 
@@ -272,8 +275,43 @@ whatsappRouter.post('/disconnect', async (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/whatsapp/po-image/:restaurantId/:purchaseOrderId.png
+ * Serves the dynamically generated high-resolution Excel-style Purchase Order image.
+ */
+whatsappRouter.get('/po-image/:restaurantId/:purchaseOrderId.png', async (req: Request, res: Response) => {
+  try {
+    const { restaurantId, purchaseOrderId } = req.params;
+    if (!restaurantId || !purchaseOrderId) {
+      return res.status(400).send('Missing restaurantId or purchaseOrderId');
+    }
+
+    const poRef = doc(db, 'restaurants', restaurantId, 'purchaseOrders', purchaseOrderId);
+    const poSnap = await getDoc(poRef);
+    if (!poSnap.exists()) {
+      return res.status(404).send('Purchase Order not found');
+    }
+    const po = poSnap.data() as PurchaseOrder;
+
+    const restDocRef = doc(db, 'restaurants', restaurantId);
+    const restSnap = await getDoc(restDocRef);
+    const restaurant = restSnap.data() as Restaurant | undefined;
+    const restaurantName = restaurant?.name || 'Restaurant Store Control';
+
+    const { buffer, filename } = generateServerPoImageBuffer(po, restaurantName);
+
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    return res.send(buffer);
+  } catch (err) {
+    console.error('Failed to generate PO image:', err);
+    return res.status(500).send('Failed to generate PO image');
+  }
+});
+
+/**
  * POST /api/whatsapp/send-po
- * Staff and Manager endpoint to send a Purchase Order via WhatsApp Cloud API
+ * Staff and Manager endpoint to send an Excel-style Purchase Order Image via WhatsApp Cloud API
  */
 whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
   try {
@@ -287,18 +325,16 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
     const config = await getRestaurantWhatsAppConfig(restaurantId);
     if (!config || !config.connected) {
       return res.status(400).json({
-        code: 'WHATSAPP_NOT_CONNECTED',
-        error:
-          'WhatsApp Business is not connected for this restaurant. Please ask the Owner to connect WhatsApp Business before sending purchase orders.',
+        code: 'WHATSAPP_NOT_CONFIGURED',
+        error: 'Automatic WhatsApp is not configured. Use Manual WhatsApp.',
       });
     }
 
     const token = getTenantSecureToken(restaurantId);
     if (!token) {
       return res.status(400).json({
-        code: 'WHATSAPP_AUTH_MISSING',
-        error:
-          'WhatsApp access token is missing on the server. Please ask the Owner to re-connect WhatsApp Business.',
+        code: 'WHATSAPP_NOT_CONFIGURED',
+        error: 'Automatic WhatsApp is not configured. Use Manual WhatsApp.',
       });
     }
 
@@ -338,15 +374,17 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
       });
     }
 
-    // Fetch restaurant name & currency
+    // Fetch restaurant name
     const restDocRef = doc(db, 'restaurants', restaurantId);
     const restSnap = await getDoc(restDocRef);
     const restaurant = restSnap.data() as Restaurant | undefined;
     const restaurantName = restaurant?.name || 'Restaurant Store Control';
-    const currencySymbol = restaurant?.currencySymbol || restaurant?.currency || '₹';
 
-    // Generate PO message
-    const messageBody = generatePoMessageText(po, restaurantName, po.vendorName, currencySymbol);
+    // Generate high-resolution Excel-style PO image buffer
+    const { buffer: imageBuffer, filename: imageFilename } = generateServerPoImageBuffer(
+      po,
+      restaurantName
+    );
 
     // Record pre-send audit
     await recordWhatsAppAuditLog({
@@ -355,17 +393,32 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
       actorName: userName || 'Staff',
       action: 'PO_WHATSAPP_SEND_REQUESTED',
       entityId: po.id,
-      details: `Initiated official WhatsApp Cloud API dispatch for PO #${po.poNumber} to ${normalizedPhone}`,
+      details: `Initiating official WhatsApp Cloud API image dispatch for PO #${po.poNumber} to ${normalizedPhone}`,
     });
 
-    // Send via Meta Cloud API
+    // Send Image via Meta Cloud API
     let metaResult;
+    let uploadedMediaId: string | undefined;
+    const caption = `Purchase Order ${po.poNumber}\n${restaurantName}\nSupplier: ${po.vendorName}\nPlease confirm receipt and delivery schedule.`;
+
     try {
-      metaResult = await sendMetaCloudApiMessage({
+      // 1. Upload Excel-style PO image to Meta Media
+      const uploadData = await uploadMetaMedia({
+        phoneNumberId: config.phoneNumberId,
+        accessToken: token,
+        buffer: imageBuffer,
+        filename: imageFilename,
+        mimeType: 'image/png',
+      });
+      uploadedMediaId = uploadData.mediaId;
+
+      // 2. Dispatch official image message
+      metaResult = await sendMetaCloudApiImageMessage({
         phoneNumberId: config.phoneNumberId,
         accessToken: token,
         to: normalizedPhone,
-        body: messageBody,
+        mediaId: uploadedMediaId,
+        caption,
       });
     } catch (apiErr) {
       const errMsg = apiErr instanceof Error ? apiErr.message : String(apiErr);
@@ -382,7 +435,8 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
         vendorPhone: normalizedPhone,
         messageId: failedMsgId,
         status: 'FAILED',
-        messageBody,
+        mediaType: 'image',
+        messageBody: caption,
         createdAt: new Date().toISOString(),
         failedAt: new Date().toISOString(),
         errorMessage: errMsg,
@@ -399,7 +453,7 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
         actorName: userName || 'Staff',
         action: 'PO_WHATSAPP_FAILED',
         entityId: po.id,
-        details: `Failed to dispatch PO #${po.poNumber} via WhatsApp: ${errMsg}`,
+        details: `Failed to dispatch Excel-style PO #${po.poNumber} image via WhatsApp: ${errMsg}`,
       });
 
       return res.status(502).json({
@@ -422,7 +476,10 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
       vendorPhone: normalizedPhone,
       messageId,
       status: 'SENT',
-      messageBody,
+      mediaType: 'image',
+      mediaId: uploadedMediaId,
+      imageUrl: `/api/whatsapp/po-image/${restaurantId}/${po.id}.png`,
+      messageBody: caption,
       createdAt: now,
       sentAt: now,
       sentByUid: userUid,
@@ -440,6 +497,7 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
       sentByName: userName || 'Staff',
       whatsappMessageId: messageId,
       vendorPhone: normalizedPhone,
+      whatsappSessionInfo: 'Excel-style PO Image dispatched via official Meta Cloud API',
       updatedAt: now,
     });
 
@@ -454,7 +512,7 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
       actorName: userName || 'Staff',
       action: 'PO_WHATSAPP_SENT',
       entityId: po.id,
-      details: `Successfully dispatched PO #${po.poNumber} via WhatsApp Cloud API (Message ID: ${messageId}) to ${normalizedPhone}`,
+      details: `Successfully dispatched Excel-style PO #${po.poNumber} image via WhatsApp Cloud API (Message ID: ${messageId}) to ${normalizedPhone}`,
     });
 
     return res.json({

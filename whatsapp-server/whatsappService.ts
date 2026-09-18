@@ -357,6 +357,112 @@ export async function sendMetaCloudApiMessage(params: {
 }
 
 /**
+ * Uploads an image binary to Meta Graph API Media storage
+ * Returns media ID for message dispatch
+ */
+export async function uploadMetaMedia(params: {
+  phoneNumberId: string;
+  accessToken: string;
+  buffer: Buffer;
+  filename: string;
+  mimeType?: string;
+}): Promise<{ mediaId: string }> {
+  const url = `https://graph.facebook.com/v21.0/${params.phoneNumberId}/media`;
+
+  const formData = new FormData();
+  formData.append(
+    'file',
+    new Blob([params.buffer], { type: params.mimeType || 'image/png' }),
+    params.filename
+  );
+  formData.append('type', params.mimeType || 'image/png');
+  formData.append('messaging_product', 'whatsapp');
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${params.accessToken}`,
+    },
+    body: formData,
+  });
+
+  const data = await response.json();
+
+  if (!response.ok || data.error) {
+    const errMsg = data.error?.message || `Meta Media upload failed (${response.status})`;
+    const errCode = data.error?.code ? `Code ${data.error.code}: ` : '';
+    throw new Error(`${errCode}${errMsg}`);
+  }
+
+  const mediaId = data.id;
+  if (!mediaId) {
+    throw new Error('Meta Media API did not return a valid media ID');
+  }
+
+  return { mediaId };
+}
+
+/**
+ * Dispatches an official WhatsApp Cloud API image message (Excel-style PO image)
+ */
+export async function sendMetaCloudApiImageMessage(params: {
+  phoneNumberId: string;
+  accessToken: string;
+  to: string;
+  mediaId?: string;
+  imageLink?: string;
+  caption?: string;
+}): Promise<{ messageId: string }> {
+  const url = `https://graph.facebook.com/v21.0/${params.phoneNumberId}/messages`;
+
+  const imageObj: Record<string, any> = {};
+  if (params.mediaId) {
+    imageObj.id = params.mediaId;
+  } else if (params.imageLink) {
+    imageObj.link = params.imageLink;
+  } else {
+    throw new Error('Either mediaId or imageLink must be provided for image message');
+  }
+
+  if (params.caption && params.caption.trim()) {
+    imageObj.caption = params.caption.trim();
+  }
+
+  const payload = {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: params.to,
+    type: 'image',
+    image: imageObj,
+  };
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${params.accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok || data.error) {
+    const errMsg = data.error?.message || `WhatsApp Cloud API error (${response.status})`;
+    const errCode = data.error?.code ? `Code ${data.error.code}: ` : '';
+    const errSubcode = data.error?.error_subcode ? ` (Subcode ${data.error.error_subcode})` : '';
+    throw new Error(`${errCode}${errMsg}${errSubcode}`);
+  }
+
+  const messageId = data.messages?.[0]?.id;
+  if (!messageId) {
+    throw new Error('WhatsApp Cloud API did not return a valid message ID');
+  }
+
+  return { messageId };
+}
+
+/**
  * Writes an immutable audit log record to Firestore
  */
 export async function recordWhatsAppAuditLog(params: {

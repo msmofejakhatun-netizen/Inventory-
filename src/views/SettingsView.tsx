@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import {
   Settings,
   Building2,
@@ -16,6 +16,7 @@ import {
   Clock,
   XCircle,
   Mail,
+  Edit2,
 } from 'lucide-react';
 import {
   collection,
@@ -27,11 +28,28 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebase/config';
 import { useAuth } from '../context/AuthContext';
-import { Department, RestaurantUser, UserRole, StaffInvitation } from '../types';
-import { inviteTeamMember, revokeInvitation, removeTeamMember } from '../services/restaurantService';
+import { Department, RestaurantUser, UserRole, StaffAuthorization } from '../types';
+import {
+  addActiveTeamMember,
+  updateTeamMember,
+  removeTeamMember,
+} from '../services/restaurantService';
 import { Modal } from '../components/common/Modal';
 import { Badge } from '../components/common/Badge';
 import { WhatsAppSettingsCard } from '../components/whatsapp/WhatsAppSettingsCard';
+
+export interface DisplayMember {
+  id: string;
+  uid?: string;
+  authorizationId?: string;
+  name: string;
+  email: string;
+  role: UserRole;
+  departmentId: string | null;
+  departmentName: string | null;
+  status: 'ACTIVE' | 'INACTIVE';
+  isOwner: boolean;
+}
 
 export const SettingsView: React.FC = () => {
   const { activeRestaurant, activeRestaurantId, user, userProfile, hasRole, activeRole } = useAuth();
@@ -53,9 +71,9 @@ export const SettingsView: React.FC = () => {
   const [newDeptDescription, setNewDeptDescription] = useState('');
   const [isDeptModalOpen, setIsDeptModalOpen] = useState(false);
 
-  // Team members & Invitations
-  const [teamMembers, setTeamMembers] = useState<RestaurantUser[]>([]);
-  const [pendingInvitations, setPendingInvitations] = useState<StaffInvitation[]>([]);
+  // Direct-Active Team members & Authorizations
+  const [teamUsers, setTeamUsers] = useState<RestaurantUser[]>([]);
+  const [authorizations, setAuthorizations] = useState<StaffAuthorization[]>([]);
   const [isMemberModalOpen, setIsMemberModalOpen] = useState(false);
   const [memberEmail, setMemberEmail] = useState('');
   const [memberName, setMemberName] = useState('');
@@ -65,6 +83,14 @@ export const SettingsView: React.FC = () => {
   const [memberError, setMemberError] = useState<string | null>(null);
   const [memberSuccess, setMemberSuccess] = useState<string | null>(null);
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
+
+  // Edit Member Modal
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [editingMember, setEditingMember] = useState<DisplayMember | null>(null);
+  const [editRole, setEditRole] = useState<UserRole>('DEPARTMENT_STAFF');
+  const [editDeptId, setEditDeptId] = useState('');
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
 
   useEffect(() => {
     if (activeRestaurant) {
@@ -84,23 +110,71 @@ export const SettingsView: React.FC = () => {
     });
 
     const unsubUsers = onSnapshot(collection(db, 'restaurants', activeRestaurantId, 'users'), (snap) => {
-      setTeamMembers(snap.docs.map((d) => d.data() as RestaurantUser));
+      setTeamUsers(snap.docs.map((d) => d.data() as RestaurantUser));
     });
 
-    const unsubInvites = onSnapshot(collection(db, 'restaurants', activeRestaurantId, 'invitations'), (snap) => {
-      setPendingInvitations(
-        snap.docs
-          .map((d) => d.data() as StaffInvitation)
-          .filter((inv) => inv.status === 'PENDING')
-      );
+    const unsubAuths = onSnapshot(collection(db, 'restaurants', activeRestaurantId, 'authorizations'), (snap) => {
+      setAuthorizations(snap.docs.map((d) => d.data() as StaffAuthorization));
     });
 
     return () => {
       unsubDepts();
       unsubUsers();
-      unsubInvites();
+      unsubAuths();
     };
   }, [activeRestaurantId]);
+
+  // Combine users and authorizations into a unified direct-active team list
+  const activeTeamMembers: DisplayMember[] = useMemo(() => {
+    const map = new Map<string, DisplayMember>();
+
+    teamUsers.forEach((u) => {
+      const emailKey = (u.email || u.uid).trim().toLowerCase();
+      map.set(emailKey, {
+        id: u.uid,
+        uid: u.uid,
+        authorizationId: u.authorizationId,
+        name: u.name || 'Staff Member',
+        email: u.email || u.uid,
+        role: u.role,
+        departmentId: u.departmentId || null,
+        departmentName: u.departmentName || null,
+        status:
+          u.status === 'inactive' || u.status === 'INACTIVE' || u.accountStatus === 'SUSPENDED'
+            ? 'INACTIVE'
+            : 'ACTIVE',
+        isOwner: u.role === 'OWNER',
+      });
+    });
+
+    authorizations.forEach((a) => {
+      const emailKey = a.email.trim().toLowerCase();
+      const existing = map.get(emailKey);
+      if (!existing) {
+        map.set(emailKey, {
+          id: a.id,
+          uid: a.attachedUid,
+          authorizationId: a.id,
+          name: a.fullName,
+          email: a.email,
+          role: a.role,
+          departmentId: a.departmentId || null,
+          departmentName: a.departmentName || null,
+          status:
+            a.status === 'INACTIVE' || a.accountStatus === 'SUSPENDED'
+              ? 'INACTIVE'
+              : 'ACTIVE',
+          isOwner: a.role === 'OWNER',
+        });
+      } else {
+        if (!existing.authorizationId) {
+          existing.authorizationId = a.id;
+        }
+      }
+    });
+
+    return Array.from(map.values());
+  }, [teamUsers, authorizations]);
 
   const handleSaveGeneral = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -162,8 +236,8 @@ export const SettingsView: React.FC = () => {
       return;
     }
 
-    if (!memberName.trim()) {
-      setMemberError('Please enter staff full name.');
+    if (!memberName.trim() || memberName.trim().length < 2) {
+      setMemberError('Please enter a valid staff full name.');
       return;
     }
 
@@ -188,7 +262,7 @@ export const SettingsView: React.FC = () => {
       setMemberSaving(true);
       const selectedDept = departments.find((d) => d.id === memberDeptId);
 
-      const res = await inviteTeamMember(
+      const res = await addActiveTeamMember(
         activeRestaurantId,
         activeRestaurant.name,
         {
@@ -210,7 +284,7 @@ export const SettingsView: React.FC = () => {
         return;
       }
 
-      setMemberSuccess(`Team member authorized! An invitation has been created for ${memberEmail.trim()}.`);
+      setMemberSuccess('Team member added successfully.');
       setMemberEmail('');
       setMemberName('');
       setMemberRole('DEPARTMENT_STAFF');
@@ -220,7 +294,7 @@ export const SettingsView: React.FC = () => {
         setIsMemberModalOpen(false);
         setMemberSuccess(null);
         setMemberError(null);
-      }, 1800);
+      }, 1000);
     } catch (err) {
       console.error('[handleAddTeamMember] Error authorizing team member:', err);
       setMemberError('Unable to add team member. Please try again.');
@@ -229,33 +303,81 @@ export const SettingsView: React.FC = () => {
     }
   };
 
-  const handleRevokeInvitation = async (invitationId: string, email: string) => {
-    if (!activeRestaurantId || !user) return;
-    if (!confirm(`Are you sure you want to revoke the pending authorization for ${email}?`)) return;
-    setActionLoadingId(invitationId);
+  const handleOpenEdit = (m: DisplayMember) => {
+    setEditingMember(m);
+    setEditRole(m.role);
+    setEditDeptId(m.departmentId || '');
+    setEditError(null);
+    setIsEditModalOpen(true);
+  };
+
+  const handleSaveEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeRestaurantId || !user || !editingMember) return;
+    setEditError(null);
+    setEditSaving(true);
     try {
-      const res = await revokeInvitation(activeRestaurantId, invitationId, {
-        uid: user.uid,
-        name: user.displayName || userProfile?.name || 'Authorized Manager',
-        role: (activeRole as UserRole) || 'OWNER',
-      });
+      const selectedDept = departments.find((d) => d.id === editDeptId);
+      const res = await updateTeamMember(
+        activeRestaurantId,
+        editingMember.id,
+        {
+          role: editRole,
+          departmentId: editDeptId || null,
+          departmentName: selectedDept?.name || null,
+        },
+        {
+          uid: user.uid,
+          name: user.displayName || userProfile?.name || 'Authorized Manager',
+          role: (activeRole as UserRole) || 'OWNER',
+        }
+      );
+      if (!res.success) {
+        setEditError(res.error || 'Failed to update member.');
+        return;
+      }
+      setIsEditModalOpen(false);
+      setEditingMember(null);
+    } catch (err) {
+      console.error('Error updating member:', err);
+      setEditError('Unable to update team member.');
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  const handleToggleStatus = async (m: DisplayMember) => {
+    if (!activeRestaurantId || !user) return;
+    const newStatus = m.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
+    setActionLoadingId(m.id);
+    try {
+      const res = await updateTeamMember(
+        activeRestaurantId,
+        m.id,
+        { status: newStatus },
+        {
+          uid: user.uid,
+          name: user.displayName || userProfile?.name || 'Authorized Manager',
+          role: (activeRole as UserRole) || 'OWNER',
+        }
+      );
       if (!res.success && res.error) {
         alert(res.error);
       }
     } catch (err) {
-      console.error('Failed to revoke invitation:', err);
-      alert('Unable to revoke invitation. Please try again.');
+      console.error('Failed to toggle member status:', err);
+      alert('Unable to update member status. Please try again.');
     } finally {
       setActionLoadingId(null);
     }
   };
 
-  const handleRemoveMember = async (memberUid: string, memberName: string) => {
+  const handleRemoveMember = async (memberId: string, memberName: string) => {
     if (!activeRestaurantId || !user) return;
     if (!confirm(`Are you sure you want to remove ${memberName} from this restaurant?`)) return;
-    setActionLoadingId(memberUid);
+    setActionLoadingId(memberId);
     try {
-      const res = await removeTeamMember(activeRestaurantId, memberUid, memberName, {
+      const res = await removeTeamMember(activeRestaurantId, memberId, memberName, {
         uid: user.uid,
         name: user.displayName || userProfile?.name || 'Authorized Manager',
         role: (activeRole as UserRole) || 'OWNER',
@@ -461,7 +583,7 @@ export const SettingsView: React.FC = () => {
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <h3 className="text-xs font-bold text-stone-700 uppercase tracking-wider">
-              Active Team Members ({teamMembers.length})
+              Active Team Members ({activeTeamMembers.length})
             </h3>
           </div>
           <div className="overflow-x-auto border border-stone-200 rounded-lg">
@@ -471,29 +593,32 @@ export const SettingsView: React.FC = () => {
                   <th className="py-2.5 px-4">Name</th>
                   <th className="py-2.5 px-4">Email / ID</th>
                   <th className="py-2.5 px-4">Role</th>
-                  <th className="py-2.5 px-4">Department Access</th>
+                  <th className="py-2.5 px-4">Department</th>
+                  <th className="py-2.5 px-4">Status</th>
                   {hasRole(['OWNER', 'MANAGER']) && (
                     <th className="py-2.5 px-4 text-right">Actions</th>
                   )}
                 </tr>
               </thead>
               <tbody className="divide-y divide-stone-100">
-                {teamMembers.length === 0 ? (
+                {activeTeamMembers.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="py-6 text-center text-stone-400">
+                    <td colSpan={6} className="py-6 text-center text-stone-400">
                       No active team members found.
                     </td>
                   </tr>
                 ) : (
-                  teamMembers.map((m) => (
-                    <tr key={m.uid} className="hover:bg-stone-50/60">
-                      <td className="py-2.5 px-4 font-semibold text-stone-900 flex items-center gap-2">
-                        <div className="w-6 h-6 rounded-full bg-stone-200 flex items-center justify-center font-bold text-stone-700 text-[11px]">
-                          {m.name.charAt(0).toUpperCase()}
+                  activeTeamMembers.map((m) => (
+                    <tr key={m.id} className="hover:bg-stone-50/60">
+                      <td className="py-2.5 px-4 font-semibold text-stone-900">
+                        <div className="flex items-center gap-2">
+                          <div className="w-6 h-6 rounded-full bg-stone-200 flex items-center justify-center font-bold text-stone-700 text-[11px]">
+                            {m.name.charAt(0).toUpperCase()}
+                          </div>
+                          <span>{m.name}</span>
                         </div>
-                        {m.name}
                       </td>
-                      <td className="py-2.5 px-4 text-stone-600 font-mono text-[11px]">{m.email || m.uid}</td>
+                      <td className="py-2.5 px-4 text-stone-600 font-mono text-[11px]">{m.email}</td>
                       <td className="py-2.5 px-4">
                         <Badge
                           variant={
@@ -511,24 +636,63 @@ export const SettingsView: React.FC = () => {
                         </Badge>
                       </td>
                       <td className="py-2.5 px-4 text-stone-500">
-                        {departments.find((d) => d.id === m.departmentId)?.name || 'All Departments'}
+                        {departments.find((d) => d.id === m.departmentId)?.name || m.departmentName || 'All Departments'}
+                      </td>
+                      <td className="py-2.5 px-4">
+                        {m.status === 'ACTIVE' ? (
+                          <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200/80 px-2.5 py-0.5 rounded-full">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-600"></span>
+                            ACTIVE
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-rose-800 bg-rose-50 border border-rose-200/80 px-2.5 py-0.5 rounded-full">
+                            <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>
+                            INACTIVE
+                          </span>
+                        )}
                       </td>
                       {hasRole(['OWNER', 'MANAGER']) && (
                         <td className="py-2.5 px-4 text-right">
-                          {m.role !== 'OWNER' && user?.uid !== m.uid && (
-                            <button
-                              onClick={() => handleRemoveMember(m.uid, m.name)}
-                              disabled={actionLoadingId === m.uid}
-                              title="Remove team member"
-                              className="p-1 text-stone-400 hover:text-rose-600 rounded transition-colors"
-                            >
-                              {actionLoadingId === m.uid ? (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin text-rose-600" />
-                              ) : (
-                                <Trash2 className="w-3.5 h-3.5" />
-                              )}
-                            </button>
-                          )}
+                          <div className="flex items-center justify-end gap-1.5">
+                            {!m.isOwner && (
+                              <>
+                                <button
+                                  onClick={() => handleOpenEdit(m)}
+                                  disabled={actionLoadingId === m.id}
+                                  title="Edit Role & Department"
+                                  className="p-1 text-stone-500 hover:text-stone-900 hover:bg-stone-100 rounded transition-colors"
+                                >
+                                  <Edit2 className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={() => handleToggleStatus(m)}
+                                  disabled={actionLoadingId === m.id}
+                                  title={m.status === 'ACTIVE' ? 'Deactivate team member' : 'Activate team member'}
+                                  className={`px-2 py-0.5 text-[11px] font-semibold rounded border transition-colors ${
+                                    m.status === 'ACTIVE'
+                                      ? 'text-amber-700 bg-amber-50/50 border-amber-200 hover:bg-amber-100/60'
+                                      : 'text-emerald-700 bg-emerald-50/50 border-emerald-200 hover:bg-emerald-100/60'
+                                  }`}
+                                >
+                                  {m.status === 'ACTIVE' ? 'Deactivate' : 'Activate'}
+                                </button>
+                              </>
+                            )}
+                            {!m.isOwner && user?.uid !== m.id && user?.uid !== m.uid && (
+                              <button
+                                onClick={() => handleRemoveMember(m.id, m.name)}
+                                disabled={actionLoadingId === m.id}
+                                title="Remove team member"
+                                className="p-1 text-stone-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors"
+                              >
+                                {actionLoadingId === m.id ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin text-rose-600" />
+                                ) : (
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                )}
+                              </button>
+                            )}
+                          </div>
                         </td>
                       )}
                     </tr>
@@ -538,83 +702,6 @@ export const SettingsView: React.FC = () => {
             </table>
           </div>
         </div>
-
-        {/* Pending Invitations & Authorizations */}
-        {pendingInvitations.length > 0 && (
-          <div className="space-y-2 pt-3 border-t border-stone-100">
-            <div className="flex items-center gap-2">
-              <Clock className="w-3.5 h-3.5 text-amber-600" />
-              <h3 className="text-xs font-bold text-stone-800 uppercase tracking-wider">
-                Pending Staff Authorizations ({pendingInvitations.length})
-              </h3>
-            </div>
-            <div className="overflow-x-auto border border-amber-200/70 bg-amber-50/20 rounded-lg">
-              <table className="w-full text-left text-xs text-stone-600">
-                <thead className="bg-amber-50/80 border-b border-amber-200/60 text-[10px] font-bold text-amber-900 uppercase tracking-wider">
-                  <tr>
-                    <th className="py-2.5 px-4">Authorized Staff</th>
-                    <th className="py-2.5 px-4">Email Address</th>
-                    <th className="py-2.5 px-4">Assigned Role</th>
-                    <th className="py-2.5 px-4">Department Access</th>
-                    <th className="py-2.5 px-4">Status</th>
-                    {hasRole(['OWNER', 'MANAGER']) && (
-                      <th className="py-2.5 px-4 text-right">Action</th>
-                    )}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-amber-100/60">
-                  {pendingInvitations.map((inv) => (
-                    <tr key={inv.id} className="hover:bg-amber-50/50">
-                      <td className="py-2.5 px-4 font-semibold text-stone-900">{inv.fullName}</td>
-                      <td className="py-2.5 px-4 text-stone-700 font-mono text-[11px]">{inv.email}</td>
-                      <td className="py-2.5 px-4">
-                        <Badge
-                          variant={
-                            inv.requestedRole === 'OWNER'
-                              ? 'success'
-                              : inv.requestedRole === 'MANAGER'
-                              ? 'info'
-                              : inv.requestedRole === 'STOREKEEPER'
-                              ? 'warning'
-                              : 'neutral'
-                          }
-                          size="sm"
-                        >
-                          {inv.requestedRole}
-                        </Badge>
-                      </td>
-                      <td className="py-2.5 px-4 text-stone-600">
-                        {inv.departmentName || 'All Departments'}
-                      </td>
-                      <td className="py-2.5 px-4">
-                        <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-800 bg-amber-100/80 px-2 py-0.5 rounded-full">
-                          <Clock className="w-3 h-3 text-amber-700" />
-                          Pending Activation
-                        </span>
-                      </td>
-                      {hasRole(['OWNER', 'MANAGER']) && (
-                        <td className="py-2.5 px-4 text-right">
-                          <button
-                            onClick={() => handleRevokeInvitation(inv.id, inv.email)}
-                            disabled={actionLoadingId === inv.id}
-                            className="inline-flex items-center gap-1 text-[11px] font-medium text-rose-600 hover:text-rose-700 hover:underline px-2 py-1 rounded transition-colors"
-                          >
-                            {actionLoadingId === inv.id ? (
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                            ) : (
-                              <XCircle className="w-3 h-3" />
-                            )}
-                            Revoke
-                          </button>
-                        </td>
-                      )}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
       </div>
 
       {/* Add Department Modal */}
@@ -670,7 +757,7 @@ export const SettingsView: React.FC = () => {
         </form>
       </Modal>
 
-      {/* Add Member Modal */}
+      {/* Authorize Team Member Modal */}
       <Modal
         isOpen={isMemberModalOpen}
         onClose={() => {
@@ -680,8 +767,8 @@ export const SettingsView: React.FC = () => {
             setMemberSuccess(null);
           }
         }}
-        title="Authorize Team Member"
-        subtitle="Assign store room roles and operational permissions"
+        title="Add Team Member"
+        subtitle="Authorize staff member with immediate active access to the restaurant store"
         maxWidth="md"
       >
         <form onSubmit={handleAddTeamMember} className="space-y-4">
@@ -730,8 +817,8 @@ export const SettingsView: React.FC = () => {
               onChange={(e) => setMemberEmail(e.target.value)}
               className="w-full px-3 py-2 text-xs border border-stone-300 rounded-lg focus:outline-none focus:border-amber-500 disabled:bg-stone-100 disabled:text-stone-400"
             />
-            <p className="text-[11px] text-stone-400 mt-1">
-              When this staff member logs in using Google or Phone OTP with this email, their account will securely activate with the role assigned below.
+            <p className="text-[11px] text-stone-500 mt-1">
+              Direct authorization will be granted immediately. The member is immediately active.
             </p>
           </div>
           <div>
@@ -746,8 +833,12 @@ export const SettingsView: React.FC = () => {
             >
               <option value="DEPARTMENT_STAFF">Department Staff (Requisitions)</option>
               <option value="STOREKEEPER">Storekeeper (Inward & Issues)</option>
-              <option value="MANAGER">Manager (Audits & Reports)</option>
-              <option value="OWNER">Owner (Full Admin)</option>
+              {activeRole === 'OWNER' && (
+                <>
+                  <option value="MANAGER">Manager (Audits & Reports)</option>
+                  <option value="OWNER">Owner (Full Admin)</option>
+                </>
+              )}
             </select>
           </div>
           <div>
@@ -794,6 +885,101 @@ export const SettingsView: React.FC = () => {
                 </>
               ) : (
                 <span>Save Team Member</span>
+              )}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* Edit Team Member Modal */}
+      <Modal
+        isOpen={isEditModalOpen}
+        onClose={() => {
+          if (!editSaving) {
+            setIsEditModalOpen(false);
+            setEditingMember(null);
+            setEditError(null);
+          }
+        }}
+        title="Edit Team Member"
+        subtitle={editingMember ? `${editingMember.name} (${editingMember.email})` : 'Update role and department access'}
+        maxWidth="md"
+      >
+        <form onSubmit={handleSaveEdit} className="space-y-4">
+          {editError && (
+            <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
+              <div className="flex-1">
+                <p className="font-semibold">{editError}</p>
+              </div>
+            </div>
+          )}
+
+          <div>
+            <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1">
+              Role
+            </label>
+            <select
+              disabled={editSaving}
+              value={editRole}
+              onChange={(e) => setEditRole(e.target.value as UserRole)}
+              className="w-full px-3 py-2 text-xs border border-stone-300 rounded-lg bg-white disabled:bg-stone-100 disabled:text-stone-400"
+            >
+              <option value="DEPARTMENT_STAFF">Department Staff (Requisitions)</option>
+              <option value="STOREKEEPER">Storekeeper (Inward & Issues)</option>
+              {activeRole === 'OWNER' && (
+                <>
+                  <option value="MANAGER">Manager (Audits & Reports)</option>
+                  <option value="OWNER">Owner (Full Admin)</option>
+                </>
+              )}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1">
+              Department Assigned
+            </label>
+            <select
+              disabled={editSaving}
+              value={editDeptId}
+              onChange={(e) => setEditDeptId(e.target.value)}
+              className="w-full px-3 py-2 text-xs border border-stone-300 rounded-lg bg-white disabled:bg-stone-100 disabled:text-stone-400"
+            >
+              <option value="">All Departments</option>
+              {departments.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="pt-3 flex justify-end gap-2 border-t border-stone-100">
+            <button
+              type="button"
+              disabled={editSaving}
+              onClick={() => {
+                setIsEditModalOpen(false);
+                setEditingMember(null);
+                setEditError(null);
+              }}
+              className="px-4 py-2 text-xs font-semibold text-stone-600 hover:text-stone-800 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={editSaving}
+              className="flex items-center gap-1.5 px-5 py-2 bg-stone-900 hover:bg-stone-800 text-white text-xs font-semibold rounded-lg disabled:opacity-50 transition-colors"
+            >
+              {editSaving ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Saving...</span>
+                </>
+              ) : (
+                <span>Update Member</span>
               )}
             </button>
           </div>

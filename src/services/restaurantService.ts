@@ -24,6 +24,7 @@ import {
   Restaurant,
   RestaurantUser,
   StaffInvitation,
+  StaffAuthorization,
   UserRole,
   Department,
   Item,
@@ -1678,10 +1679,10 @@ export async function receivePurchaseOrderTransaction(
 }
 
 // ==========================================
-// AUTHORIZED TEAM MEMBERS & INVITATIONS
+// AUTHORIZED DIRECT-ACTIVE TEAM MEMBERS
 // ==========================================
 
-export async function inviteTeamMember(
+export async function addActiveTeamMember(
   restaurantId: string,
   restaurantName: string,
   caller: { uid: string; name: string; role: UserRole },
@@ -1692,7 +1693,7 @@ export async function inviteTeamMember(
     departmentId?: string | null;
     departmentName?: string | null;
   }
-): Promise<{ success: boolean; invitationId?: string; error?: string }> {
+): Promise<{ success: boolean; memberId?: string; error?: string }> {
   if (!restaurantId) {
     return { success: false, error: 'Restaurant ID is required' };
   }
@@ -1717,66 +1718,143 @@ export async function inviteTeamMember(
     return { success: false, error: 'Only restaurant Owners or Managers can authorize team members.' };
   }
 
+  // RBAC Role Elevation Protection: Managers cannot grant Owner or Manager roles
+  if (caller.role === 'MANAGER' && (params.role === 'OWNER' || params.role === 'MANAGER')) {
+    return { success: false, error: 'Managers can only authorize Storekeeper or Department Staff roles.' };
+  }
+
   try {
     // 1. Check if user already exists as an active member in this restaurant
     const usersColRef = collection(db, 'restaurants', restaurantId, 'users');
     const existingUsersSnap = await getDocs(usersColRef);
     const alreadyMember = existingUsersSnap.docs.some((d) => {
       const u = d.data() as RestaurantUser;
-      return Boolean(u.email && u.email.trim().toLowerCase() === normalizedEmail);
+      return (
+        Boolean(u.email && u.email.trim().toLowerCase() === normalizedEmail) &&
+        u.status !== 'inactive' &&
+        u.status !== 'INACTIVE'
+      );
     });
 
     if (alreadyMember) {
       return {
         success: false,
-        error: 'Team member already exists or has a pending invitation.',
+        error: 'Team member already exists.',
       };
     }
 
-    // 2. Check if a pending invitation already exists for this email in this restaurant
-    const invColRef = collection(db, 'restaurants', restaurantId, 'invitations');
-    const existingInvSnap = await getDocs(
-      query(invColRef, where('email', '==', normalizedEmail), where('status', '==', 'PENDING'))
+    // 2. Check if active authorization already exists in authorizations subcollection
+    const authColRef = collection(db, 'restaurants', restaurantId, 'authorizations');
+    const existingAuthSnap = await getDocs(
+      query(authColRef, where('email', '==', normalizedEmail))
     );
 
-    if (!existingInvSnap.empty) {
+    const activeAuthDoc = existingAuthSnap.docs.find((d) => {
+      const a = d.data() as StaffAuthorization;
+      return a.status === 'ACTIVE';
+    });
+
+    if (activeAuthDoc) {
       return {
         success: false,
-        error: 'Team member already exists or has a pending invitation.',
+        error: 'Team member already exists.',
       };
     }
 
-    // 3. Create the pending invitation doc
-    const invRef = doc(invColRef);
-    const now = new Date().toISOString();
+    // 3. Check for any legacy PENDING invitation and migrate it directly to ACTIVE
+    const invColRef = collection(db, 'restaurants', restaurantId, 'invitations');
+    const existingInvSnap = await getDocs(
+      query(invColRef, where('email', '==', normalizedEmail))
+    );
+    const legacyPendingInv = existingInvSnap.docs.find((d) => {
+      const inv = d.data() as StaffInvitation;
+      return inv.status === 'PENDING';
+    });
 
-    const invitationData: StaffInvitation = {
-      id: invRef.id,
+    const now = new Date().toISOString();
+    const batch = writeBatch(db);
+
+    // Reuse existing doc ID if migrating from pending invitation, or generate new ID
+    const authRef = legacyPendingInv ? doc(authColRef, legacyPendingInv.id) : doc(authColRef);
+
+    const authData: StaffAuthorization = {
+      id: authRef.id,
       restaurantId,
       restaurantName: restaurantName || 'Restaurant',
       email: normalizedEmail,
       fullName,
-      requestedRole: params.role,
+      role: params.role,
       departmentId: params.departmentId || null,
       departmentName: params.departmentName || null,
-      invitedByUid: caller.uid,
-      invitedByName: caller.name || 'Authorized Manager',
-      invitedByRole: caller.role,
-      invitedAt: now,
-      status: 'PENDING',
+      status: 'ACTIVE',
+      accountStatus: 'ACTIVE',
+      authorizedByUid: caller.uid,
+      authorizedByName: caller.name || 'Authorized Manager',
+      authorizedByRole: caller.role,
+      authorizedAt: now,
     };
 
-    // 4. Create immutable audit log entry
+    // If migrating legacy invitation, mark the legacy record as ACCEPTED / migrated
+    if (legacyPendingInv) {
+      batch.update(legacyPendingInv.ref, {
+        status: 'ACCEPTED',
+        acceptedAt: now,
+        acceptedByUid: caller.uid,
+      });
+    }
+
+    // 4. Check if a user with this email has already registered an account in root users
+    const rootUserQuery = query(collection(db, 'users'), where('email', '==', normalizedEmail), limit(1));
+    const rootUserSnap = await getDocs(rootUserQuery);
+
+    if (!rootUserSnap.empty) {
+      const registeredUserDoc = rootUserSnap.docs[0];
+      const registeredUid = registeredUserDoc.id;
+      authData.attachedUid = registeredUid;
+
+      // Link directly into restaurant users subcollection with ACTIVE status
+      const userMemberRef = doc(db, 'restaurants', restaurantId, 'users', registeredUid);
+      const newMember: RestaurantUser = {
+        uid: registeredUid,
+        name: fullName,
+        email: normalizedEmail,
+        role: params.role,
+        departmentId: params.departmentId || null,
+        departmentName: params.departmentName || null,
+        restaurantId,
+        status: 'ACTIVE',
+        accountStatus: 'ACTIVE',
+        authorizedByUid: caller.uid,
+        authorizedByName: caller.name || 'Authorized Manager',
+        authorizedAt: now,
+        authorizationId: authRef.id,
+        createdAt: now,
+      };
+      batch.set(userMemberRef, newMember);
+
+      // Append restaurant to root user profile
+      batch.set(
+        registeredUserDoc.ref,
+        {
+          restaurantIds: arrayUnion(restaurantId),
+        },
+        { merge: true }
+      );
+    }
+
+    batch.set(authRef, authData);
+
+    // 5. Immutable Audit Log (TEAM_MEMBER_CREATED)
     const auditRef = doc(collection(db, 'restaurants', restaurantId, 'auditLogs'));
     const auditData: AuditLog = {
       id: auditRef.id,
       actorUid: caller.uid,
       actorName: caller.name || 'Authorized Manager',
       actorRole: caller.role,
-      action: 'TEAM_MEMBER_INVITED',
+      action: 'TEAM_MEMBER_CREATED',
       entity: 'TeamMember',
-      entityId: invRef.id,
-      details: `Authorized invitation issued to ${fullName} (${normalizedEmail}) for role ${params.role}${
+      entityId: authRef.id,
+      details: `Team member ${fullName} (${normalizedEmail}) authorized with role ${params.role}${
         params.departmentName ? ` in ${params.departmentName}` : ''
       }`,
       targetEmail: normalizedEmail,
@@ -1785,20 +1863,129 @@ export async function inviteTeamMember(
       restaurantId,
       createdAt: now,
     };
-
-    // Commit both writes
-    const batch = writeBatch(db);
-    batch.set(invRef, invitationData);
     batch.set(auditRef, auditData);
-    await batch.commit();
 
-    return { success: true, invitationId: invRef.id };
+    await batch.commit();
+    return { success: true, memberId: authRef.id };
   } catch (err) {
-    console.error('[inviteTeamMember] Technical diagnostic error:', err);
+    console.error('[addActiveTeamMember] Technical diagnostic error:', err);
     return {
       success: false,
       error: 'Unable to add team member. Please try again.',
     };
+  }
+}
+
+// Backward-compatible alias for existing call sites
+export async function inviteTeamMember(
+  restaurantId: string,
+  restaurantName: string,
+  caller: { uid: string; name: string; role: UserRole },
+  params: {
+    fullName: string;
+    email: string;
+    role: UserRole;
+    departmentId?: string | null;
+    departmentName?: string | null;
+  }
+): Promise<{ success: boolean; invitationId?: string; error?: string }> {
+  const result = await addActiveTeamMember(restaurantId, restaurantName, caller, params);
+  return {
+    success: result.success,
+    invitationId: result.memberId,
+    error: result.error,
+  };
+}
+
+export async function updateTeamMember(
+  restaurantId: string,
+  memberId: string,
+  updates: {
+    role?: UserRole;
+    departmentId?: string | null;
+    departmentName?: string | null;
+    status?: 'ACTIVE' | 'INACTIVE';
+    accountStatus?: 'ACTIVE' | 'SUSPENDED';
+  },
+  caller: { uid: string; name: string; role: UserRole }
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    if (caller.role !== 'OWNER' && caller.role !== 'MANAGER') {
+      return { success: false, error: 'Only Owners or Managers can update team members.' };
+    }
+
+    if (caller.role === 'MANAGER' && (updates.role === 'OWNER' || updates.role === 'MANAGER')) {
+      return { success: false, error: 'Managers cannot assign Owner or Manager roles.' };
+    }
+
+    const batch = writeBatch(db);
+    const now = new Date().toISOString();
+    let updatedName = 'Team Member';
+    let updatedEmail = '';
+
+    // Check in users subcollection
+    const userRef = doc(db, 'restaurants', restaurantId, 'users', memberId);
+    const userSnap = await getDoc(userRef);
+    if (userSnap.exists()) {
+      const userData = userSnap.data() as RestaurantUser;
+      if (userData.role === 'OWNER' && caller.role !== 'OWNER') {
+        return { success: false, error: 'Only the Restaurant Owner can modify Owner permissions.' };
+      }
+      updatedName = userData.name;
+      updatedEmail = userData.email || '';
+      batch.update(userRef, {
+        ...updates,
+      });
+    }
+
+    // Check in authorizations subcollection
+    const authRef = doc(db, 'restaurants', restaurantId, 'authorizations', memberId);
+    const authSnap = await getDoc(authRef);
+    if (authSnap.exists()) {
+      const authData = authSnap.data() as StaffAuthorization;
+      updatedName = authData.fullName;
+      updatedEmail = authData.email;
+      batch.update(authRef, {
+        ...updates,
+      });
+    } else {
+      // Find authorization by attachedUid
+      const authQuery = query(
+        collection(db, 'restaurants', restaurantId, 'authorizations'),
+        where('attachedUid', '==', memberId),
+        limit(1)
+      );
+      const authQuerySnap = await getDocs(authQuery);
+      if (!authQuerySnap.empty) {
+        batch.update(authQuerySnap.docs[0].ref, {
+          ...updates,
+        });
+      }
+    }
+
+    // Audit log
+    const auditRef = doc(collection(db, 'restaurants', restaurantId, 'auditLogs'));
+    const auditData: AuditLog = {
+      id: auditRef.id,
+      actorUid: caller.uid,
+      actorName: caller.name,
+      actorRole: caller.role,
+      action: 'TEAM_MEMBER_UPDATED',
+      entity: 'TeamMember',
+      entityId: memberId,
+      details: `Updated team member ${updatedName} (${updatedEmail}) - Role: ${updates.role || 'unchanged'}, Status: ${updates.status || 'unchanged'}`,
+      targetEmail: updatedEmail,
+      targetRole: updates.role || 'DEPARTMENT_STAFF',
+      restaurantId,
+      createdAt: now,
+    };
+    batch.set(auditRef, auditData);
+
+    await batch.commit();
+    return { success: true };
+  } catch (err) {
+    console.error('[updateTeamMember] Technical diagnostic error:', err);
+    return { success: false, error: 'Unable to update team member. Please try again.' };
   }
 }
 
@@ -1849,24 +2036,63 @@ export async function revokeInvitation(
 
 export async function removeTeamMember(
   restaurantId: string,
-  memberUid: string,
+  memberId: string,
   memberName: string,
   caller: { uid: string; name: string; role: UserRole }
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const memberRef = doc(db, 'restaurants', restaurantId, 'users', memberUid);
-    const memberSnap = await getDoc(memberRef);
-    if (!memberSnap.exists()) {
-      return { success: false, error: 'Member not found' };
+    if (caller.role !== 'OWNER' && caller.role !== 'MANAGER') {
+      return { success: false, error: 'Only Owners or Managers can remove team members.' };
     }
-    const memberData = memberSnap.data() as RestaurantUser;
-    if (memberData.role === 'OWNER') {
-      return { success: false, error: 'Cannot remove restaurant owner' };
+
+    if (caller.uid === memberId) {
+      return { success: false, error: 'You cannot remove yourself from the restaurant.' };
     }
 
     const now = new Date().toISOString();
     const batch = writeBatch(db);
-    batch.delete(memberRef);
+    let targetEmail = '';
+    let targetRole: UserRole = 'DEPARTMENT_STAFF';
+
+    // 1. Check users subcollection
+    const memberRef = doc(db, 'restaurants', restaurantId, 'users', memberId);
+    const memberSnap = await getDoc(memberRef);
+    if (memberSnap.exists()) {
+      const memberData = memberSnap.data() as RestaurantUser;
+      if (memberData.role === 'OWNER') {
+        return { success: false, error: 'Cannot remove restaurant owner.' };
+      }
+      targetEmail = memberData.email || '';
+      targetRole = memberData.role;
+      batch.delete(memberRef);
+    }
+
+    // 2. Check authorizations subcollection (direct doc or attachedUid)
+    const authRef = doc(db, 'restaurants', restaurantId, 'authorizations', memberId);
+    const authSnap = await getDoc(authRef);
+    if (authSnap.exists()) {
+      const authData = authSnap.data() as StaffAuthorization;
+      if (authData.role === 'OWNER') {
+        return { success: false, error: 'Cannot remove restaurant owner.' };
+      }
+      targetEmail = authData.email || targetEmail;
+      targetRole = authData.role;
+      batch.delete(authRef);
+    } else {
+      const authQuery = query(
+        collection(db, 'restaurants', restaurantId, 'authorizations'),
+        where('attachedUid', '==', memberId)
+      );
+      const authQuerySnap = await getDocs(authQuery);
+      authQuerySnap.forEach((d) => batch.delete(d.ref));
+    }
+
+    // 3. Check legacy invitations
+    const invRef = doc(db, 'restaurants', restaurantId, 'invitations', memberId);
+    const invSnap = await getDoc(invRef);
+    if (invSnap.exists()) {
+      batch.delete(invRef);
+    }
 
     const auditRef = doc(collection(db, 'restaurants', restaurantId, 'auditLogs'));
     const auditData: AuditLog = {
@@ -1876,10 +2102,10 @@ export async function removeTeamMember(
       actorRole: caller.role,
       action: 'TEAM_MEMBER_REMOVED',
       entity: 'RestaurantUser',
-      entityId: memberUid,
-      details: `Removed team member ${memberName} (${memberData.email || memberUid}) [Role: ${memberData.role}]`,
-      targetEmail: memberData.email,
-      targetRole: memberData.role,
+      entityId: memberId,
+      details: `Removed team member ${memberName} (${targetEmail || memberId}) [Role: ${targetRole}]`,
+      targetEmail,
+      targetRole,
       restaurantId,
       createdAt: now,
     };
@@ -1893,7 +2119,7 @@ export async function removeTeamMember(
   }
 }
 
-export async function activatePendingInvitationsForUser(user: {
+export async function syncUserAuthorizations(user: {
   uid: string;
   email?: string | null;
   displayName?: string | null;
@@ -1901,49 +2127,45 @@ export async function activatePendingInvitationsForUser(user: {
   if (!user.email) return [];
   const normalizedEmail = user.email.trim().toLowerCase();
   const activatedRestaurantIds: string[] = [];
+  const now = new Date().toISOString();
 
   try {
-    const invQuery = query(
-      collectionGroup(db, 'invitations'),
+    // 1. Sync from direct active authorizations
+    const authQuery = query(
+      collectionGroup(db, 'authorizations'),
       where('email', '==', normalizedEmail),
-      where('status', '==', 'PENDING')
+      where('status', '==', 'ACTIVE')
     );
-    const invSnap = await getDocs(invQuery);
+    const authSnap = await getDocs(authQuery);
 
-    if (invSnap.empty) {
-      return [];
-    }
-
-    for (const d of invSnap.docs) {
-      const inv = d.data() as StaffInvitation;
-      const rId = inv.restaurantId;
+    for (const d of authSnap.docs) {
+      const authData = d.data() as StaffAuthorization;
+      const rId = authData.restaurantId;
       if (!rId) continue;
 
       try {
-        const now = new Date().toISOString();
         const userMemberRef = doc(db, 'restaurants', rId, 'users', user.uid);
-        const invRef = d.ref;
+        const batch = writeBatch(db);
 
         const newMember: RestaurantUser = {
           uid: user.uid,
-          name: user.displayName || inv.fullName || 'Staff Member',
+          name: authData.fullName || user.displayName || 'Staff Member',
           email: normalizedEmail,
-          role: inv.requestedRole, // Role strictly enforced from invitation!
-          departmentId: inv.departmentId || null,
-          departmentName: inv.departmentName || null,
+          role: authData.role,
+          departmentId: authData.departmentId || null,
+          departmentName: authData.departmentName || null,
           restaurantId: rId,
-          status: 'active',
+          status: 'ACTIVE',
           accountStatus: 'ACTIVE',
+          authorizedByUid: authData.authorizedByUid,
+          authorizedByName: authData.authorizedByName,
+          authorizedAt: authData.authorizedAt,
+          authorizationId: d.id,
           createdAt: now,
         };
 
-        const batch = writeBatch(db);
-        batch.set(userMemberRef, newMember);
-        batch.update(invRef, {
-          status: 'ACCEPTED',
-          acceptedAt: now,
-          acceptedByUid: user.uid,
-        });
+        batch.set(userMemberRef, newMember, { merge: true });
+        batch.update(d.ref, { attachedUid: user.uid });
 
         // Add to user's root profile restaurantIds
         const rootUserRef = doc(db, 'users', user.uid);
@@ -1955,36 +2177,82 @@ export async function activatePendingInvitationsForUser(user: {
           { merge: true }
         );
 
-        // Audit log
-        const auditRef = doc(collection(db, 'restaurants', rId, 'auditLogs'));
-        const auditData: AuditLog = {
-          id: auditRef.id,
-          actorUid: user.uid,
-          actorName: user.displayName || inv.fullName,
-          actorRole: inv.requestedRole,
-          action: 'TEAM_MEMBER_ACTIVATED',
-          entity: 'TeamMember',
-          entityId: user.uid,
-          details: `Staff member ${inv.fullName} (${normalizedEmail}) activated account with role ${inv.requestedRole}`,
-          targetEmail: normalizedEmail,
-          targetRole: inv.requestedRole,
-          department: inv.departmentName || 'All Departments',
+        await batch.commit();
+        activatedRestaurantIds.push(rId);
+        console.log(`[Staff Sync] Linked active authorization for ${normalizedEmail} in restaurant ${rId}`);
+      } catch (authLinkErr) {
+        console.error(`[Staff Sync] Error linking authorization ${d.id}:`, authLinkErr);
+      }
+    }
+
+    // 2. Sync from any legacy invitations (migrate to active)
+    const invQuery = query(
+      collectionGroup(db, 'invitations'),
+      where('email', '==', normalizedEmail),
+      where('status', 'in', ['PENDING', 'ACCEPTED'])
+    );
+    const invSnap = await getDocs(invQuery);
+
+    for (const d of invSnap.docs) {
+      const inv = d.data() as StaffInvitation;
+      const rId = inv.restaurantId;
+      if (!rId || activatedRestaurantIds.includes(rId)) continue;
+
+      try {
+        const userMemberRef = doc(db, 'restaurants', rId, 'users', user.uid);
+        const batch = writeBatch(db);
+
+        const newMember: RestaurantUser = {
+          uid: user.uid,
+          name: user.displayName || inv.fullName || 'Staff Member',
+          email: normalizedEmail,
+          role: inv.requestedRole,
+          departmentId: inv.departmentId || null,
+          departmentName: inv.departmentName || null,
           restaurantId: rId,
+          status: 'ACTIVE',
+          accountStatus: 'ACTIVE',
+          authorizedByUid: inv.invitedByUid,
+          authorizedByName: inv.invitedByName,
+          authorizedAt: inv.invitedAt,
           createdAt: now,
         };
-        batch.set(auditRef, auditData);
+
+        batch.set(userMemberRef, newMember, { merge: true });
+        batch.update(d.ref, {
+          status: 'ACCEPTED',
+          acceptedAt: now,
+          acceptedByUid: user.uid,
+        });
+
+        const rootUserRef = doc(db, 'users', user.uid);
+        batch.set(
+          rootUserRef,
+          {
+            restaurantIds: arrayUnion(rId),
+          },
+          { merge: true }
+        );
 
         await batch.commit();
         activatedRestaurantIds.push(rId);
-        console.log(`[Staff Activation] Successfully activated membership for ${normalizedEmail} in restaurant ${rId}`);
-      } catch (activationErr) {
-        console.error(`[Staff Activation] Error activating invitation ${d.id}:`, activationErr);
+      } catch (legacyErr) {
+        console.error(`[Legacy Invitation Sync] Error:`, legacyErr);
       }
     }
   } catch (err) {
-    console.error('[activatePendingInvitationsForUser] Diagnostic check:', err);
+    console.error('[syncUserAuthorizations] Error syncing authorizations:', err);
   }
 
-  return activatedRestaurantIds;
+  return Array.from(new Set(activatedRestaurantIds));
+}
+
+// Backward-compatible alias for existing call sites
+export async function activatePendingInvitationsForUser(user: {
+  uid: string;
+  email?: string | null;
+  displayName?: string | null;
+}): Promise<string[]> {
+  return syncUserAuthorizations(user);
 }
 

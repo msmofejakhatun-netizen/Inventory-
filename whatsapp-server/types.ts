@@ -40,6 +40,9 @@ export interface WhatsAppMessageRecord {
   messageId: string;
   status: WhatsAppMessageStatus;
   messageBody?: string;
+  mediaType?: 'image' | 'text';
+  mediaId?: string;
+  imageUrl?: string;
   createdAt: string;
   sentAt?: string;
   deliveredAt?: string;

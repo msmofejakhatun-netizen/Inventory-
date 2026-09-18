@@ -19,11 +19,12 @@ import {
   getDocs,
   query,
   where,
+  collectionGroup,
 } from 'firebase/firestore';
 import { auth, db, validateFirebaseConnection } from '../firebase/config';
 import { handleFirestoreError, OperationType } from '../firebase/errorHandler';
-import { UserProfile, Restaurant, RestaurantUser, UserRole } from '../types';
-import { activatePendingInvitationsForUser } from '../services/restaurantService';
+import { UserProfile, Restaurant, RestaurantUser, StaffAuthorization, UserRole } from '../types';
+import { syncUserAuthorizations } from '../services/restaurantService';
 
 export type LoadingStage = 'connecting' | 'authenticating' | 'fetching_data' | 'syncing_inventory' | 'ready';
 
@@ -127,21 +128,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         setUserProfile(profileData);
 
-        // Check and activate any authorized staff invitations for this user's verified identity
+        // Check and sync any authorized restaurant memberships for this user's verified identity
         let effectiveRestaurantIds = profileData.restaurantIds || [];
         if (currentUser.email) {
           try {
-            const newlyActivated = await activatePendingInvitationsForUser({
+            const newlyLinked = await syncUserAuthorizations({
               uid: currentUser.uid,
               email: currentUser.email,
               displayName: currentUser.displayName || profileData.name,
             });
-            if (newlyActivated.length > 0) {
-              effectiveRestaurantIds = Array.from(new Set([...effectiveRestaurantIds, ...newlyActivated]));
+            if (newlyLinked.length > 0) {
+              effectiveRestaurantIds = Array.from(new Set([...effectiveRestaurantIds, ...newlyLinked]));
               setUserProfile((prev) => (prev ? { ...prev, restaurantIds: effectiveRestaurantIds } : prev));
             }
-          } catch (invErr) {
-            console.error('Error during invitation activation check:', invErr);
+          } catch (syncErr) {
+            console.error('Error during authorization sync:', syncErr);
           }
         }
 
@@ -199,6 +200,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (userSnap.exists()) {
         const profile = userSnap.data() as UserProfile;
         setUserProfile(profile);
+
+        if (currentUser.email) {
+          try {
+            await syncUserAuthorizations({
+              uid: currentUser.uid,
+              email: currentUser.email,
+              displayName: currentUser.displayName || profile.name,
+            });
+          } catch (syncErr) {
+            console.error('Error during authorization sync in retry:', syncErr);
+          }
+        }
+
         setLoadingStage('syncing_inventory');
         setLoadingProgress(90);
         await loadUserRestaurants(currentUser.uid, profile.restaurantIds || []);
@@ -224,12 +238,40 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       // 2. Query any explicitly assigned restaurants
       const memberList: Restaurant[] = [];
+      const checkedIds = new Set<string>(ownedList.map((r) => r.id));
+
       for (const rId of assignedRestaurantIds) {
-        if (!ownedList.some((r) => r.id === rId)) {
+        if (!checkedIds.has(rId)) {
+          checkedIds.add(rId);
           const rDoc = await getDoc(doc(db, 'restaurants', rId));
           if (rDoc.exists()) {
             memberList.push(rDoc.data() as Restaurant);
           }
+        }
+      }
+
+      // 3. Query active authorizations by email to catch any restaurants
+      const currentUser = auth.currentUser;
+      if (currentUser?.email) {
+        try {
+          const authGroupQuery = query(
+            collectionGroup(db, 'authorizations'),
+            where('email', '==', currentUser.email.trim().toLowerCase()),
+            where('status', '==', 'ACTIVE')
+          );
+          const authGroupSnap = await getDocs(authGroupQuery);
+          for (const d of authGroupSnap.docs) {
+            const authData = d.data() as StaffAuthorization;
+            if (authData.restaurantId && !checkedIds.has(authData.restaurantId)) {
+              checkedIds.add(authData.restaurantId);
+              const rDoc = await getDoc(doc(db, 'restaurants', authData.restaurantId));
+              if (rDoc.exists()) {
+                memberList.push(rDoc.data() as Restaurant);
+              }
+            }
+          }
+        } catch (authErr) {
+          console.error('Error querying authorizations collection group in loadUserRestaurants:', authErr);
         }
       }
 
@@ -262,9 +304,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (userMemberDoc.exists()) {
         const uData = userMemberDoc.data() as RestaurantUser;
         setActiveRole(uData.role);
-      } else {
-        setActiveRole('DEPARTMENT_STAFF');
+        return;
       }
+
+      // Fallback check in authorizations subcollection
+      const currentUser = auth.currentUser;
+      if (currentUser?.email) {
+        const authQuery = query(
+          collection(db, 'restaurants', restaurant.id, 'authorizations'),
+          where('email', '==', currentUser.email.trim().toLowerCase()),
+          where('status', '==', 'ACTIVE')
+        );
+        const authSnap = await getDocs(authQuery);
+        if (!authSnap.empty) {
+          const authData = authSnap.docs[0].data() as StaffAuthorization;
+          setActiveRole(authData.role);
+          return;
+        }
+      }
+
+      setActiveRole('DEPARTMENT_STAFF');
     } catch (e) {
       console.error('Error resolving role:', e);
       setActiveRole('DEPARTMENT_STAFF');

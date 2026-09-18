@@ -77,6 +77,29 @@
       },
       "required": ["id", "restaurantId", "email", "fullName", "requestedRole", "invitedByUid", "status"]
     },
+    "StaffAuthorization": {
+      "title": "StaffAuthorization",
+      "description": "Direct active restaurant staff authorization with RBAC",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "restaurantId": { "type": "string" },
+        "restaurantName": { "type": "string" },
+        "email": { "type": "string" },
+        "fullName": { "type": "string" },
+        "role": { "type": "string", "enum": ["OWNER", "MANAGER", "STOREKEEPER", "DEPARTMENT_STAFF"] },
+        "departmentId": { "type": "string" },
+        "departmentName": { "type": "string" },
+        "status": { "type": "string", "enum": ["ACTIVE", "INACTIVE"] },
+        "accountStatus": { "type": "string", "enum": ["ACTIVE", "SUSPENDED"] },
+        "authorizedByUid": { "type": "string" },
+        "authorizedByName": { "type": "string" },
+        "authorizedByRole": { "type": "string" },
+        "authorizedAt": { "type": "string" },
+        "attachedUid": { "type": "string" }
+      },
+      "required": ["id", "restaurantId", "email", "fullName", "role", "status", "accountStatus", "authorizedByUid", "authorizedAt"]
+    },
     "Department": {
       "title": "Department",
       "description": "Kitchen or operational department (Indian, Chinese, Tandoor, Bar, Bakery, etc.)",
@@ -442,6 +465,10 @@
     "/restaurants/{restaurantId}/invitations/{invitationId}": {
       "schema": "StaffInvitation",
       "description": "Authorized staff invitations with RBAC"
+    },
+    "/restaurants/{restaurantId}/authorizations/{authorizationId}": {
+      "schema": "StaffAuthorization",
+      "description": "Direct active restaurant staff authorizations with RBAC"
     },
     "/restaurants/{restaurantId}/departments/{departmentId}": {
       "schema": "Department",

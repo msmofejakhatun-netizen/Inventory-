@@ -22,6 +22,9 @@ import {
   PackageCheck,
   Ban,
   FileCheck,
+  Download,
+  Share2,
+  Image as ImageIcon,
 } from 'lucide-react';
 import {
   collection,
@@ -49,6 +52,7 @@ import {
 } from '../services/restaurantService';
 import { exportPurchaseOrderPdf } from '../services/exportService';
 import { sendPoViaWhatsAppApi, fetchWhatsAppStatus } from '../services/whatsappClient';
+import { generateClientPoImage } from '../utils/excelPoImage';
 import { WhatsAppPoHistory } from '../components/whatsapp/WhatsAppPoHistory';
 import { Modal } from '../components/common/Modal';
 import { Badge } from '../components/common/Badge';
@@ -61,6 +65,11 @@ interface WhatsAppModalState {
   isSending: boolean;
   isNotConnected?: boolean;
   errorMessage?: string;
+  imageUrl: string | null;
+  imageBlob: Blob | null;
+  imageFilename: string;
+  isGeneratingImage: boolean;
+  shareSuccessMessage?: string;
 }
 
 interface ReceiveModalState {
@@ -137,6 +146,11 @@ export const PurchaseOrdersView: React.FC = () => {
     vendorPhone: '',
     messageText: '',
     isSending: false,
+    imageUrl: null,
+    imageBlob: null,
+    imageFilename: '',
+    isGeneratingImage: false,
+    shareSuccessMessage: '',
   });
 
   // Receive Order Modal
@@ -334,37 +348,136 @@ export const PurchaseOrdersView: React.FC = () => {
       return;
     }
 
-    // Check if WhatsApp Business is connected for this restaurant
-    try {
-      const statusRes = await fetchWhatsAppStatus(activeRestaurantId);
-      if (!statusRes.connected) {
-        setWhatsappModal({
-          isOpen: true,
-          po,
-          vendorPhone: phone,
-          messageText: '',
-          isSending: false,
-          isNotConnected: true,
-          errorMessage: 'WhatsApp not connected. Please ask the Owner to connect WhatsApp Business in Settings.',
-        });
-        return;
-      }
-    } catch (e: any) {
-      console.warn('Failed to verify WhatsApp connection status:', e);
-    }
-
-    const messageText = generateWhatsAppMessage(po, po.vendorName);
-
-    // Open official cloud API dispatch modal (no WhatsApp Web / no browser window.open)
+    // Open modal immediately in generating state
     setWhatsappModal({
       isOpen: true,
       po,
       vendorPhone: phone,
-      messageText,
+      messageText: `Purchase Order ${po.poNumber} • ${po.vendorName}`,
       isSending: false,
       isNotConnected: false,
       errorMessage: '',
+      imageUrl: null,
+      imageBlob: null,
+      imageFilename: '',
+      isGeneratingImage: true,
+      shareSuccessMessage: '',
     });
+
+    // Check official WhatsApp Cloud API connection status in background
+    let isConnected = false;
+    try {
+      const statusRes = await fetchWhatsAppStatus(activeRestaurantId);
+      isConnected = !!statusRes.connected;
+    } catch (e: any) {
+      console.warn('Failed to verify WhatsApp connection status:', e);
+    }
+
+    // Generate the dynamic Excel-style Purchase Order image
+    try {
+      const { blob, dataUrl, filename } = await generateClientPoImage(
+        po,
+        activeRestaurant?.name || 'Restaurant Store Control'
+      );
+
+      setWhatsappModal((prev) => ({
+        ...prev,
+        imageUrl: dataUrl,
+        imageBlob: blob,
+        imageFilename: filename,
+        isGeneratingImage: false,
+        isNotConnected: !isConnected,
+      }));
+    } catch (imgErr: any) {
+      console.error('Failed to generate Excel-style PO image:', imgErr);
+      setWhatsappModal((prev) => ({
+        ...prev,
+        isGeneratingImage: false,
+        isNotConnected: !isConnected,
+        errorMessage: 'Failed to generate Excel-style PO image. Please try again.',
+      }));
+    }
+  };
+
+  /**
+   * Manual WhatsApp Mode: Native device share or download + direct WhatsApp open
+   * Never fakes SENT or DELIVERED status.
+   */
+  const handleManualWhatsAppShare = async () => {
+    if (!whatsappModal.po || !whatsappModal.imageBlob) return;
+    const po = whatsappModal.po;
+    const phone = whatsappModal.vendorPhone;
+    const cleanDigits = phone.replace(/[^0-9]/g, '');
+    const filename = whatsappModal.imageFilename || `PO_${po.poNumber}.png`;
+
+    try {
+      const file = new File([whatsappModal.imageBlob], filename, { type: 'image/png' });
+
+      // Check if browser supports Web Share API with files (Android / iOS native sharing)
+      if (
+        typeof navigator !== 'undefined' &&
+        navigator.share &&
+        navigator.canShare &&
+        navigator.canShare({ files: [file] })
+      ) {
+        await navigator.share({
+          files: [file],
+          title: `Purchase Order ${po.poNumber}`,
+          text: `Purchase Order ${po.poNumber} from ${activeRestaurant?.name || 'Restaurant Store Control'}`,
+        });
+        setWhatsappModal((prev) => ({
+          ...prev,
+          shareSuccessMessage: 'Share dialog opened. Select WhatsApp to send the Excel order sheet directly to vendor.',
+        }));
+        return;
+      }
+
+      // Desktop or browser without file sharing support:
+      // 1. Download the generated Excel PO image automatically
+      const link = document.createElement('a');
+      link.href = whatsappModal.imageUrl || URL.createObjectURL(whatsappModal.imageBlob);
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      // 2. Open WhatsApp Web / App with order notice
+      const orderNote = encodeURIComponent(
+        `Hello ${po.vendorName},\nPlease find our Purchase Order #${po.poNumber} attached as an Excel-style sheet image.\nKindly confirm availability and delivery schedule.`
+      );
+      const waUrl = cleanDigits
+        ? `https://wa.me/${cleanDigits}?text=${orderNote}`
+        : `https://wa.me/?text=${orderNote}`;
+      window.open(waUrl, '_blank', 'noopener,noreferrer');
+
+      setWhatsappModal((prev) => ({
+        ...prev,
+        shareSuccessMessage: 'Excel order image downloaded! WhatsApp opened. Please attach the image and send to your vendor.',
+      }));
+    } catch (shareErr: any) {
+      if (shareErr.name !== 'AbortError') {
+        console.warn('Native share failed or canceled, falling back to download:', shareErr);
+        handleDownloadPoImage();
+        setWhatsappModal((prev) => ({
+          ...prev,
+          shareSuccessMessage: 'Excel order image downloaded to your device. You can attach it in WhatsApp.',
+        }));
+      }
+    }
+  };
+
+  /**
+   * Download the dynamically generated Excel-style PO image
+   */
+  const handleDownloadPoImage = () => {
+    if (!whatsappModal.imageBlob || !whatsappModal.imageUrl) return;
+    const filename = whatsappModal.imageFilename || `PO_${whatsappModal.po?.poNumber || 'order'}.png`;
+    const link = document.createElement('a');
+    link.href = whatsappModal.imageUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const handleExecuteWhatsAppSend = async () => {
@@ -383,7 +496,7 @@ export const PurchaseOrdersView: React.FC = () => {
           user?.uid || 'system',
           userProfile?.name || 'Authorized User',
           {
-            whatsappSessionInfo: `Transmitting via official WhatsApp Business Platform...`,
+            whatsappSessionInfo: `Transmitting Excel-style PO Image via official WhatsApp Cloud API...`,
           }
         );
       } catch (statusErr) {
@@ -401,7 +514,7 @@ export const PurchaseOrdersView: React.FC = () => {
       });
 
       setWhatsappModal((prev) => ({ ...prev, isOpen: false, isSending: false, errorMessage: '' }));
-      alert(`PO #${targetPo.poNumber} successfully transmitted to vendor via WhatsApp Cloud API! (Message ID: ${res.messageId})`);
+      alert(`PO #${targetPo.poNumber} Excel sheet image successfully dispatched via official WhatsApp Cloud API! (Message ID: ${res.messageId})`);
     } catch (err: any) {
       console.error('Failed to dispatch PO via WhatsApp Cloud API:', err);
       // Status remains PENDING_SEND, show clear error to user, allow retry
@@ -917,9 +1030,9 @@ export const PurchaseOrdersView: React.FC = () => {
                       <>
                         <button
                           onClick={() => handleInitiateWhatsAppSend(po)}
-                          className="flex items-center gap-1 px-3 py-1.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold shadow-2xs transition-colors"
+                          className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold shadow-2xs transition-colors"
                         >
-                          <Send className="w-3.5 h-3.5" /> Send via WhatsApp
+                          <MessageSquare className="w-3.5 h-3.5" /> WhatsApp Order
                         </button>
                         <button
                           onClick={() => handleCancelPo(po)}
@@ -936,9 +1049,9 @@ export const PurchaseOrdersView: React.FC = () => {
                       <>
                         <button
                           onClick={() => handleInitiateWhatsAppSend(po)}
-                          className="flex items-center gap-1 px-3 py-1.5 text-xs bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-semibold shadow-2xs transition-colors"
+                          className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-semibold shadow-2xs transition-colors"
                         >
-                          <RefreshCw className="w-3.5 h-3.5" /> Retry WhatsApp
+                          <RefreshCw className="w-3.5 h-3.5" /> WhatsApp Order
                         </button>
                         <button
                           onClick={() => handleCancelPo(po)}
@@ -1254,114 +1367,168 @@ export const PurchaseOrdersView: React.FC = () => {
       </Modal>
 
       {/* ------------------------------------------------------------------- */}
-      {/* MODAL 3: OFFICIAL WHATSAPP BUSINESS PLATFORM CLOUD API DISPATCH      */}
+      {/* MODAL 3: EXCEL-STYLE PURCHASE ORDER IMAGE & WHATSAPP DISPATCH       */}
       {/* ------------------------------------------------------------------- */}
       <Modal
         isOpen={whatsappModal.isOpen}
         onClose={() => setWhatsappModal((prev) => ({ ...prev, isOpen: false }))}
-        title={
-          whatsappModal.isNotConnected
-            ? 'WhatsApp Business Not Connected'
-            : 'Send Purchase Order via WhatsApp'
-        }
-        subtitle={
-          whatsappModal.isNotConnected
-            ? 'Owner connection required for automated dispatches'
-            : `Official Meta Cloud API • Order ${whatsappModal.po?.poNumber} to ${whatsappModal.po?.vendorName}`
-        }
-        maxWidth="lg"
+        title="WhatsApp Order"
+        subtitle={`Excel Order Sheet • ${whatsappModal.po?.poNumber || ''} • ${whatsappModal.po?.vendorName || ''}`}
+        maxWidth="2xl"
       >
-        {whatsappModal.isNotConnected ? (
-          <div className="space-y-4 text-xs">
-            <div className="p-4 bg-rose-50 rounded-xl border border-rose-200 flex items-start gap-3 text-rose-900">
-              <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
-              <div className="space-y-1">
-                <p className="font-bold text-sm">🔴 WhatsApp Not Connected</p>
-                <p className="text-rose-800">
-                  Please ask the Owner to connect WhatsApp Business before sending purchase orders.
+        <div className="space-y-4 text-xs">
+          {/* Vendor Details Banner */}
+          <div className="p-3 bg-stone-50 rounded-xl border border-stone-200 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-bold text-stone-500 uppercase tracking-wide">Vendor:</span>
+              <span className="font-semibold text-stone-900 text-xs">{whatsappModal.po?.vendorName}</span>
+            </div>
+            <div className="flex items-center gap-1.5 font-mono text-stone-700 bg-white px-2.5 py-1 rounded-md border border-stone-200 text-xs">
+              <Smartphone className="w-3.5 h-3.5 text-emerald-600" />
+              <span>{whatsappModal.vendorPhone}</span>
+            </div>
+          </div>
+
+          {/* Automatic Mode Status Notice */}
+          {whatsappModal.isNotConnected ? (
+            <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 flex items-start gap-2.5 text-amber-900">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div className="space-y-0.5">
+                <p className="font-bold text-xs text-amber-950">
+                  Automatic WhatsApp is not configured. Use Manual WhatsApp.
                 </p>
-                <p className="text-[11px] text-stone-600 mt-1">
-                  The restaurant store control system sends Purchase Orders directly through the official Meta WhatsApp Business Cloud API. Staff do not need WhatsApp Web or QR codes, but the restaurant's official number must be connected once by the Owner in <strong>Settings → WhatsApp Business</strong>.
+                <p className="text-[11px] text-amber-800">
+                  Official Meta Cloud API is not connected. Use <strong>Share to WhatsApp</strong> or <strong>Download Image</strong> below to send the Excel-style order directly to the vendor from your device.
                 </p>
               </div>
             </div>
-
-            <div className="pt-2 flex justify-end">
-              <button
-                type="button"
-                onClick={() => setWhatsappModal((prev) => ({ ...prev, isOpen: false }))}
-                className="px-5 py-2 bg-stone-900 hover:bg-stone-800 text-white rounded-lg text-xs font-semibold"
-              >
-                Close Notice
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div className="space-y-4 text-xs">
-            {/* Meta Cloud API info banner */}
-            <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200 flex items-start gap-2.5 text-emerald-800">
+          ) : (
+            <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200 flex items-start gap-2.5 text-emerald-900">
               <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-              <div>
-                <p className="font-semibold">Official WhatsApp Cloud API Dispatch</p>
-                <p className="text-[11px] mt-0.5 text-emerald-700">
-                  This PO will be dispatched directly to vendor mobile{' '}
-                  <strong className="font-mono">{whatsappModal.vendorPhone}</strong> from the restaurant's verified WhatsApp Business account.
+              <div className="space-y-0.5">
+                <p className="font-bold text-xs text-emerald-950">
+                  Official WhatsApp Cloud API Ready
+                </p>
+                <p className="text-[11px] text-emerald-800">
+                  The restaurant's verified WhatsApp Business Cloud API is active. You can dispatch the Excel order sheet automatically, or share manually from your device.
                 </p>
               </div>
             </div>
+          )}
 
-            {/* Error banner if transmission failed */}
-            {whatsappModal.errorMessage && (
-              <div className="p-3 bg-rose-50 rounded-xl border border-rose-200 flex items-start gap-2 text-rose-800">
-                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-                <div>
-                  <p className="font-semibold">WhatsApp Cloud API Error:</p>
-                  <p className="text-[11px] mt-0.5">{whatsappModal.errorMessage}</p>
-                  <p className="text-[10px] text-stone-500 mt-1">
-                    The PO remains in PENDING_SEND status so you can retry or verify credentials.
-                  </p>
-                </div>
-              </div>
-            )}
-
-            <div>
-              <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1">
-                Purchase Order Message Preview
-              </label>
-              <div className="p-3 bg-stone-50 border border-stone-200 rounded-xl font-mono text-[11px] text-stone-800 whitespace-pre-line max-h-52 overflow-y-auto select-text">
-                {whatsappModal.messageText}
+          {/* Error Banner */}
+          {whatsappModal.errorMessage && (
+            <div className="p-3 bg-rose-50 rounded-xl border border-rose-200 flex items-start gap-2 text-rose-800">
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-semibold text-xs">WhatsApp Dispatch Error:</p>
+                <p className="text-[11px] mt-0.5">{whatsappModal.errorMessage}</p>
+                <p className="text-[10px] text-stone-500 mt-1">
+                  You can retry automatic send or use manual device sharing below.
+                </p>
               </div>
             </div>
+          )}
 
-            <div className="pt-2 flex flex-col sm:flex-row justify-end gap-2 border-t border-stone-100">
+          {/* Share/Success Banner */}
+          {whatsappModal.shareSuccessMessage && (
+            <div className="p-3 bg-teal-50 rounded-xl border border-teal-200 flex items-start gap-2 text-teal-800">
+              <CheckCircle2 className="w-4 h-4 text-teal-600 shrink-0 mt-0.5" />
+              <p className="text-[11px]">{whatsappModal.shareSuccessMessage}</p>
+            </div>
+          )}
+
+          {/* Excel-Style PO Image Preview Section */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-bold text-stone-700 uppercase tracking-wider flex items-center gap-1.5">
+                <ImageIcon className="w-3.5 h-3.5 text-emerald-600" />
+                Excel-Style PO Image Preview (PNG)
+              </label>
+              <span className="text-[10px] font-semibold text-stone-500 bg-stone-100 px-2 py-0.5 rounded">
+                {whatsappModal.po?.items?.length || 0} ITEMS • NO CROPPING
+              </span>
+            </div>
+
+            <div className="p-3 bg-stone-100 border border-stone-200 rounded-xl min-h-[200px] max-h-[380px] overflow-y-auto flex items-center justify-center">
+              {whatsappModal.isGeneratingImage ? (
+                <div className="flex flex-col items-center gap-2 text-stone-500 py-8">
+                  <RefreshCw className="w-6 h-6 animate-spin text-emerald-600" />
+                  <p className="text-xs font-medium">Generating Excel-style order sheet image...</p>
+                  <p className="text-[10px] text-stone-400">Rendering high-resolution table with exact items & quantities</p>
+                </div>
+              ) : whatsappModal.imageUrl ? (
+                <img
+                  src={whatsappModal.imageUrl}
+                  alt={`Purchase Order ${whatsappModal.po?.poNumber}`}
+                  className="max-w-full h-auto rounded shadow-sm border border-stone-300"
+                />
+              ) : (
+                <div className="text-stone-400 text-xs">Image preview not available</div>
+              )}
+            </div>
+            <p className="text-[10px] text-stone-500 italic">
+              * High-resolution spreadsheet image formatted specifically for mobile and WhatsApp readability.
+            </p>
+          </div>
+
+          {/* Action Buttons: Cancel, Download Image, Share to WhatsApp, and Automatic Cloud API */}
+          <div className="pt-3 border-t border-stone-200 flex flex-wrap items-center justify-between gap-2">
+            <button
+              type="button"
+              onClick={() => setWhatsappModal((prev) => ({ ...prev, isOpen: false }))}
+              className="px-4 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-lg transition-colors"
+            >
+              Cancel
+            </button>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Button 2: Download Image */}
               <button
                 type="button"
-                onClick={() => setWhatsappModal((prev) => ({ ...prev, isOpen: false }))}
-                className="px-4 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-lg"
+                disabled={whatsappModal.isGeneratingImage || !whatsappModal.imageUrl}
+                onClick={handleDownloadPoImage}
+                className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-stone-700 bg-white border border-stone-300 hover:bg-stone-50 rounded-lg shadow-2xs disabled:opacity-50 transition-colors"
               >
-                Cancel
+                <Download className="w-3.5 h-3.5" />
+                Download Image
               </button>
+
+              {/* Button 1: Share to WhatsApp (Manual device share) */}
               <button
                 type="button"
-                disabled={whatsappModal.isSending}
-                onClick={handleExecuteWhatsAppSend}
-                className="flex items-center justify-center gap-1.5 px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-xs disabled:opacity-50 transition-colors"
+                disabled={whatsappModal.isGeneratingImage || !whatsappModal.imageUrl}
+                onClick={handleManualWhatsAppShare}
+                className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-2xs disabled:opacity-50 transition-colors"
               >
-                {whatsappModal.isSending ? (
-                  <>
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    Transmitting via Cloud API...
-                  </>
-                ) : (
-                  <>
-                    <Send className="w-3.5 h-3.5" />
-                    {whatsappModal.errorMessage ? 'Retry WhatsApp' : 'Send via WhatsApp Cloud API'}
-                  </>
-                )}
+                <Share2 className="w-3.5 h-3.5" />
+                Share to WhatsApp
               </button>
+
+              {/* Automatic Mode: Send via Cloud API (if configured) */}
+              {!whatsappModal.isNotConnected && (
+                <button
+                  type="button"
+                  disabled={whatsappModal.isSending || whatsappModal.isGeneratingImage}
+                  onClick={handleExecuteWhatsAppSend}
+                  className="flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-teal-700 hover:bg-teal-800 rounded-lg shadow-2xs disabled:opacity-50 transition-colors"
+                >
+                  {whatsappModal.isSending ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      Transmitting via Cloud API...
+                    </>
+                  ) : (
+                    <>
+                      <Send className="w-3.5 h-3.5" />
+                      Send via Cloud API (Automatic)
+                    </>
+                  )}
+                </button>
+              )}
             </div>
           </div>
-        )}
+        </div>
       </Modal>
 
       {/* ------------------------------------------------------------------- */}

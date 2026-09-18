@@ -39,9 +39,31 @@ export interface RestaurantUser {
   departmentId?: string | null;
   departmentName?: string | null;
   restaurantId: string;
-  status: 'active' | 'inactive';
+  status: 'active' | 'inactive' | 'ACTIVE' | 'INACTIVE';
   accountStatus?: 'ACTIVE' | 'SUSPENDED';
+  authorizedByUid?: string;
+  authorizedByName?: string;
+  authorizedAt?: string;
+  authorizationId?: string;
   createdAt: string;
+}
+
+export interface StaffAuthorization {
+  id: string;
+  restaurantId: string;
+  restaurantName?: string;
+  email: string;
+  fullName: string;
+  role: UserRole;
+  departmentId?: string | null;
+  departmentName?: string | null;
+  status: 'ACTIVE' | 'INACTIVE';
+  accountStatus: 'ACTIVE' | 'SUSPENDED';
+  authorizedByUid: string;
+  authorizedByName?: string;
+  authorizedByRole?: UserRole;
+  authorizedAt: string;
+  attachedUid?: string | null;
 }
 
 export interface StaffInvitation {
