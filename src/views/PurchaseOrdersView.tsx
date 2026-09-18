@@ -17,6 +17,7 @@ import {
   ShieldAlert,
   HelpCircle,
   Smartphone,
+  MessageSquare,
   RefreshCw,
   PackageCheck,
   Ban,
@@ -24,6 +25,7 @@ import {
 } from 'lucide-react';
 import {
   collection,
+  doc,
   onSnapshot,
   query,
   orderBy,
@@ -46,6 +48,8 @@ import {
   ReceiveOrderLineItem,
 } from '../services/restaurantService';
 import { exportPurchaseOrderPdf } from '../services/exportService';
+import { sendPoViaWhatsAppApi, fetchWhatsAppStatus } from '../services/whatsappClient';
+import { WhatsAppPoHistory } from '../components/whatsapp/WhatsAppPoHistory';
 import { Modal } from '../components/common/Modal';
 import { Badge } from '../components/common/Badge';
 
@@ -55,6 +59,8 @@ interface WhatsAppModalState {
   vendorPhone: string;
   messageText: string;
   isSending: boolean;
+  isNotConnected?: boolean;
+  errorMessage?: string;
 }
 
 interface ReceiveModalState {
@@ -82,7 +88,7 @@ interface ReceiveModalState {
 }
 
 export const PurchaseOrdersView: React.FC = () => {
-  const { activeRestaurant, activeRestaurantId, user, userProfile } = useAuth();
+  const { activeRestaurant, activeRestaurantId, user, userProfile, activeRole } = useAuth();
 
   const [orders, setOrders] = useState<PurchaseOrder[]>([]);
   const [vendors, setVendors] = useState<Vendor[]>([]);
@@ -92,10 +98,9 @@ export const PurchaseOrdersView: React.FC = () => {
   // Filter state
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
 
-  // WhatsApp Web Session State (stored purely client-side; never credentials)
-  const [isWhatsAppWebConnected, setIsWhatsAppWebConnected] = useState<boolean>(() => {
-    return localStorage.getItem('whatsapp_web_connected') === 'true';
-  });
+  // Official WhatsApp Business Platform connection state
+  const [whatsAppConnected, setWhatsAppConnected] = useState<boolean>(false);
+  const [whatsAppNumber, setWhatsAppNumber] = useState<string>('');
 
   // Create PO Modal
   const [isCreateOpen, setIsCreateOpen] = useState(false);
@@ -191,17 +196,27 @@ export const PurchaseOrdersView: React.FC = () => {
     };
   }, [activeRestaurantId]);
 
-  // Handle WhatsApp Web Session Toggle
-  const toggleWhatsAppWebConnect = () => {
-    if (!isWhatsAppWebConnected) {
-      window.open('https://web.whatsapp.com', '_blank');
-      localStorage.setItem('whatsapp_web_connected', 'true');
-      setIsWhatsAppWebConnected(true);
-    } else {
-      localStorage.removeItem('whatsapp_web_connected');
-      setIsWhatsAppWebConnected(false);
-    }
-  };
+  // Listen to official WhatsApp Business settings
+  useEffect(() => {
+    if (!activeRestaurantId) return;
+    const unsub = onSnapshot(
+      doc(db, 'restaurants', activeRestaurantId, 'settings', 'whatsapp'),
+      (snap) => {
+        if (snap.exists()) {
+          const d = snap.data();
+          setWhatsAppConnected(d.connected === true);
+          setWhatsAppNumber(d.businessPhoneNumber || '');
+        } else {
+          setWhatsAppConnected(false);
+          setWhatsAppNumber('');
+        }
+      },
+      (err) => {
+        console.warn('WhatsApp settings listener notice:', err);
+      }
+    );
+    return () => unsub();
+  }, [activeRestaurantId]);
 
   // -------------------------------------------------------------------------
   // CREATE PO WORKFLOW
@@ -305,78 +320,109 @@ export const PurchaseOrdersView: React.FC = () => {
     // Check if vendor has phone number
     const vendor = vendors.find((v) => v.id === po.vendorId);
     const phone = po.vendorPhone || vendor?.phone || vendor?.mobile || '';
+    const cleanDigits = phone.replace(/[^0-9]/g, '');
 
-    if (!phone.trim()) {
+    if (!phone.trim() || cleanDigits.length < 10) {
       // Prompt user to update phone number
       setPhoneModal({
         isOpen: true,
         vendorId: po.vendorId,
         vendorName: po.vendorName,
-        phone: '',
+        phone: phone || '',
         poIdPending: po.id,
       });
       return;
     }
 
-    const messageText = generateWhatsAppMessage(po, po.vendorName);
-
-    // Update PO to PENDING_SEND in Firestore
+    // Check if WhatsApp Business is connected for this restaurant
     try {
-      await updatePurchaseOrderStatus(
-        activeRestaurantId,
-        po.id,
-        'PENDING_SEND',
-        user?.uid || 'system',
-        userProfile?.name || 'Authorized User'
-      );
-    } catch (e) {
-      console.error('Failed to set PENDING_SEND status:', e);
+      const statusRes = await fetchWhatsAppStatus(activeRestaurantId);
+      if (!statusRes.connected) {
+        setWhatsappModal({
+          isOpen: true,
+          po,
+          vendorPhone: phone,
+          messageText: '',
+          isSending: false,
+          isNotConnected: true,
+          errorMessage: 'WhatsApp not connected. Please ask the Owner to connect WhatsApp Business in Settings.',
+        });
+        return;
+      }
+    } catch (e: any) {
+      console.warn('Failed to verify WhatsApp connection status:', e);
     }
 
-    // Open WhatsApp Web with real phone and message
-    const cleanPhone = phone.replace(/[^0-9]/g, '');
-    const standardPhone = cleanPhone.length === 10 ? `91${cleanPhone}` : cleanPhone;
-    const whatsappUrl = `https://web.whatsapp.com/send?phone=${standardPhone}&text=${encodeURIComponent(
-      messageText
-    )}`;
+    const messageText = generateWhatsAppMessage(po, po.vendorName);
 
-    window.open(whatsappUrl, '_blank');
-
-    // Open the confirmation dialog
+    // Open official cloud API dispatch modal (no WhatsApp Web / no browser window.open)
     setWhatsappModal({
       isOpen: true,
       po,
       vendorPhone: phone,
       messageText,
       isSending: false,
+      isNotConnected: false,
+      errorMessage: '',
     });
   };
 
-  const handleConfirmWhatsAppSent = async () => {
+  const handleExecuteWhatsAppSend = async () => {
     if (!activeRestaurantId || !whatsappModal.po) return;
+    const targetPo = whatsappModal.po;
+
     try {
-      setWhatsappModal((prev) => ({ ...prev, isSending: true }));
-      await updatePurchaseOrderStatus(
-        activeRestaurantId,
-        whatsappModal.po.id,
-        'SENT',
-        user?.uid || 'system',
-        userProfile?.name || 'Authorized User',
-        {
-          sentAt: new Date().toISOString(),
-          whatsappSessionInfo: `Dispatched via WhatsApp Web to ${whatsappModal.vendorPhone}`,
-        }
-      );
-      setWhatsappModal((prev) => ({ ...prev, isOpen: false, isSending: false }));
-    } catch (err) {
-      console.error('Failed to confirm WhatsApp sent:', err);
-      setWhatsappModal((prev) => ({ ...prev, isSending: false }));
+      setWhatsappModal((prev) => ({ ...prev, isSending: true, errorMessage: '' }));
+
+      // Update PO status to PENDING_SEND before transmission
+      try {
+        await updatePurchaseOrderStatus(
+          activeRestaurantId,
+          targetPo.id,
+          'PENDING_SEND',
+          user?.uid || 'system',
+          userProfile?.name || 'Authorized User',
+          {
+            whatsappSessionInfo: `Transmitting via official WhatsApp Business Platform...`,
+          }
+        );
+      } catch (statusErr) {
+        console.warn('Failed to set initial PENDING_SEND status:', statusErr);
+      }
+
+      // Call dedicated WhatsApp backend server
+      const res = await sendPoViaWhatsAppApi({
+        restaurantId: activeRestaurantId,
+        purchaseOrderId: targetPo.id,
+        vendorId: targetPo.vendorId,
+        userUid: user?.uid || 'staff',
+        userName: userProfile?.name || 'Staff User',
+        userRole: activeRole || 'DEPARTMENT_STAFF',
+      });
+
+      setWhatsappModal((prev) => ({ ...prev, isOpen: false, isSending: false, errorMessage: '' }));
+      alert(`PO #${targetPo.poNumber} successfully transmitted to vendor via WhatsApp Cloud API! (Message ID: ${res.messageId})`);
+    } catch (err: any) {
+      console.error('Failed to dispatch PO via WhatsApp Cloud API:', err);
+      // Status remains PENDING_SEND, show clear error to user, allow retry
+      const errMsg = err.message || 'WhatsApp Cloud API dispatch failed. Please retry.';
+      setWhatsappModal((prev) => ({
+        ...prev,
+        isSending: false,
+        errorMessage: errMsg,
+      }));
     }
   };
 
   const handleSaveVendorPhone = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeRestaurantId || !phoneModal.vendorId || !phoneModal.phone.trim()) return;
+
+    const cleanDigits = phoneModal.phone.replace(/[^0-9]/g, '');
+    if (cleanDigits.length < 10) {
+      alert('Invalid WhatsApp number. Mobile number must contain at least 10 digits.');
+      return;
+    }
 
     try {
       await updateVendorContact(
@@ -695,24 +741,31 @@ export const PurchaseOrdersView: React.FC = () => {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {/* WhatsApp Web Status Indicator */}
-          <button
-            onClick={toggleWhatsAppWebConnect}
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border transition-colors ${
-              isWhatsAppWebConnected
-                ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
-                : 'bg-stone-50 text-stone-600 border-stone-200 hover:bg-stone-100'
+          {/* Official WhatsApp Cloud API Status Indicator */}
+          <div
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border ${
+              whatsAppConnected
+                ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                : 'bg-stone-50 text-stone-600 border-stone-200'
             }`}
-            title="Connect your browser's WhatsApp Web session"
+            title={
+              whatsAppConnected
+                ? `Official WhatsApp Cloud API connected: ${whatsAppNumber}`
+                : 'WhatsApp not connected. Owner can connect in Settings.'
+            }
           >
-            <Smartphone className="w-3.5 h-3.5" />
+            <MessageSquare className="w-3.5 h-3.5" />
             <span
               className={`w-2 h-2 rounded-full ${
-                isWhatsAppWebConnected ? 'bg-emerald-500 animate-pulse' : 'bg-stone-400'
+                whatsAppConnected ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'
               }`}
             />
-            {isWhatsAppWebConnected ? 'WhatsApp Connected' : 'Connect WhatsApp Web'}
-          </button>
+            <span>
+              {whatsAppConnected
+                ? `WhatsApp Connected (${whatsAppNumber})`
+                : 'WhatsApp Not Connected'}
+            </span>
+          </div>
 
           <button
             id="create-po-btn"
@@ -883,27 +936,14 @@ export const PurchaseOrdersView: React.FC = () => {
                       <>
                         <button
                           onClick={() => handleInitiateWhatsAppSend(po)}
-                          className="flex items-center gap-1 px-2.5 py-1.5 text-xs bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-200 rounded-lg font-medium transition-colors"
+                          className="flex items-center gap-1 px-3 py-1.5 text-xs bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-semibold shadow-2xs transition-colors"
                         >
                           <RefreshCw className="w-3.5 h-3.5" /> Retry WhatsApp
                         </button>
                         <button
-                          onClick={() => {
-                            setWhatsappModal({
-                              isOpen: true,
-                              po,
-                              vendorPhone: vendorPhone || '',
-                              messageText: generateWhatsAppMessage(po, po.vendorName),
-                              isSending: false,
-                            });
-                          }}
-                          className="flex items-center gap-1 px-3 py-1.5 text-xs bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold shadow-2xs transition-colors"
-                        >
-                          <CheckCircle2 className="w-3.5 h-3.5" /> Confirm Sent
-                        </button>
-                        <button
                           onClick={() => handleCancelPo(po)}
                           className="px-2 py-1.5 text-xs text-stone-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
+                          title="Cancel Order"
                         >
                           <Ban className="w-3.5 h-3.5" />
                         </button>
@@ -1041,6 +1081,14 @@ export const PurchaseOrdersView: React.FC = () => {
                     )}
                   </div>
                 </div>
+
+                {/* Official WhatsApp Cloud API Delivery Timeline & History */}
+                <WhatsAppPoHistory
+                  restaurantId={activeRestaurantId}
+                  po={po}
+                  onResend={handleInitiateWhatsAppSend}
+                  isSending={whatsappModal.isSending && whatsappModal.po?.id === po.id}
+                />
               </div>
             );
           })
@@ -1206,62 +1254,114 @@ export const PurchaseOrdersView: React.FC = () => {
       </Modal>
 
       {/* ------------------------------------------------------------------- */}
-      {/* MODAL 3: WHATSAPP DISPATCH & SENT VERIFICATION                      */}
+      {/* MODAL 3: OFFICIAL WHATSAPP BUSINESS PLATFORM CLOUD API DISPATCH      */}
       {/* ------------------------------------------------------------------- */}
       <Modal
         isOpen={whatsappModal.isOpen}
         onClose={() => setWhatsappModal((prev) => ({ ...prev, isOpen: false }))}
-        title="WhatsApp PO Dispatch Verification"
-        subtitle={`Order ${whatsappModal.po?.poNumber} to ${whatsappModal.po?.vendorName}`}
+        title={
+          whatsappModal.isNotConnected
+            ? 'WhatsApp Business Not Connected'
+            : 'Send Purchase Order via WhatsApp'
+        }
+        subtitle={
+          whatsappModal.isNotConnected
+            ? 'Owner connection required for automated dispatches'
+            : `Official Meta Cloud API • Order ${whatsappModal.po?.poNumber} to ${whatsappModal.po?.vendorName}`
+        }
         maxWidth="lg"
       >
-        <div className="space-y-4">
-          <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200 flex items-start gap-2.5 text-xs text-emerald-800">
-            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+        {whatsappModal.isNotConnected ? (
+          <div className="space-y-4 text-xs">
+            <div className="p-4 bg-rose-50 rounded-xl border border-rose-200 flex items-start gap-3 text-rose-900">
+              <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <p className="font-bold text-sm">🔴 WhatsApp Not Connected</p>
+                <p className="text-rose-800">
+                  Please ask the Owner to connect WhatsApp Business before sending purchase orders.
+                </p>
+                <p className="text-[11px] text-stone-600 mt-1">
+                  The restaurant store control system sends Purchase Orders directly through the official Meta WhatsApp Business Cloud API. Staff do not need WhatsApp Web or QR codes, but the restaurant's official number must be connected once by the Owner in <strong>Settings → WhatsApp Business</strong>.
+                </p>
+              </div>
+            </div>
+
+            <div className="pt-2 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setWhatsappModal((prev) => ({ ...prev, isOpen: false }))}
+                className="px-5 py-2 bg-stone-900 hover:bg-stone-800 text-white rounded-lg text-xs font-semibold"
+              >
+                Close Notice
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-4 text-xs">
+            {/* Meta Cloud API info banner */}
+            <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200 flex items-start gap-2.5 text-emerald-800">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-semibold">Official WhatsApp Cloud API Dispatch</p>
+                <p className="text-[11px] mt-0.5 text-emerald-700">
+                  This PO will be dispatched directly to vendor mobile{' '}
+                  <strong className="font-mono">{whatsappModal.vendorPhone}</strong> from the restaurant's verified WhatsApp Business account.
+                </p>
+              </div>
+            </div>
+
+            {/* Error banner if transmission failed */}
+            {whatsappModal.errorMessage && (
+              <div className="p-3 bg-rose-50 rounded-xl border border-rose-200 flex items-start gap-2 text-rose-800">
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-semibold">WhatsApp Cloud API Error:</p>
+                  <p className="text-[11px] mt-0.5">{whatsappModal.errorMessage}</p>
+                  <p className="text-[10px] text-stone-500 mt-1">
+                    The PO remains in PENDING_SEND status so you can retry or verify credentials.
+                  </p>
+                </div>
+              </div>
+            )}
+
             <div>
-              <p className="font-semibold">WhatsApp Web Launched</p>
-              <p className="text-[11px] mt-0.5 text-emerald-700">
-                A browser tab was opened to send this order to{' '}
-                <strong className="font-mono">{whatsappModal.vendorPhone}</strong>. Complete the message send in WhatsApp Web, then click &quot;Confirm Message Sent&quot; below.
-              </p>
+              <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1">
+                Purchase Order Message Preview
+              </label>
+              <div className="p-3 bg-stone-50 border border-stone-200 rounded-xl font-mono text-[11px] text-stone-800 whitespace-pre-line max-h-52 overflow-y-auto select-text">
+                {whatsappModal.messageText}
+              </div>
+            </div>
+
+            <div className="pt-2 flex flex-col sm:flex-row justify-end gap-2 border-t border-stone-100">
+              <button
+                type="button"
+                onClick={() => setWhatsappModal((prev) => ({ ...prev, isOpen: false }))}
+                className="px-4 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={whatsappModal.isSending}
+                onClick={handleExecuteWhatsAppSend}
+                className="flex items-center justify-center gap-1.5 px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-xs disabled:opacity-50 transition-colors"
+              >
+                {whatsappModal.isSending ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    Transmitting via Cloud API...
+                  </>
+                ) : (
+                  <>
+                    <Send className="w-3.5 h-3.5" />
+                    {whatsappModal.errorMessage ? 'Retry WhatsApp' : 'Send via WhatsApp Cloud API'}
+                  </>
+                )}
+              </button>
             </div>
           </div>
-
-          <div>
-            <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1">
-              Message Preview
-            </label>
-            <div className="p-3 bg-stone-50 border border-stone-200 rounded-xl font-mono text-[11px] text-stone-800 whitespace-pre-line max-h-48 overflow-y-auto">
-              {whatsappModal.messageText}
-            </div>
-          </div>
-
-          <div className="p-3 bg-stone-100 rounded-lg text-xs text-stone-600 flex items-center justify-between">
-            <span>Status in System:</span>
-            <Badge variant="warning" size="sm">
-              PENDING SEND
-            </Badge>
-          </div>
-
-          <div className="pt-2 flex flex-col sm:flex-row justify-end gap-2 border-t border-stone-100">
-            <button
-              type="button"
-              onClick={() => setWhatsappModal((prev) => ({ ...prev, isOpen: false }))}
-              className="px-4 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-lg"
-            >
-              Keep Pending (Close)
-            </button>
-            <button
-              type="button"
-              disabled={whatsappModal.isSending}
-              onClick={handleConfirmWhatsAppSent}
-              className="flex items-center justify-center gap-1.5 px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-xs disabled:opacity-50 transition-colors"
-            >
-              <CheckCircle2 className="w-4 h-4" />
-              {whatsappModal.isSending ? 'Updating...' : 'Confirm Message Sent'}
-            </button>
-          </div>
-        </div>
+        )}
       </Modal>
 
       {/* ------------------------------------------------------------------- */}

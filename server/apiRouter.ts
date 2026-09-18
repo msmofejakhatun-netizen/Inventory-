@@ -1,9 +1,19 @@
 import express, { Request, Response } from 'express';
 import { GoogleGenAI } from '@google/genai';
+import { whatsappRouter } from '../whatsapp-server';
 
 export const apiRouter = express.Router();
 
-apiRouter.use(express.json());
+apiRouter.use(
+  express.json({
+    verify: (req: any, _res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
+
+// Dedicated WhatsApp Business API routes
+apiRouter.use('/whatsapp', whatsappRouter);
 
 // Lazy-load Gemini
 function getGeminiClient() {

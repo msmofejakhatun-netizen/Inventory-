@@ -24,6 +24,7 @@ import { useAuth } from '../context/AuthContext';
 import { Department, RestaurantUser, UserRole } from '../types';
 import { Modal } from '../components/common/Modal';
 import { Badge } from '../components/common/Badge';
+import { WhatsAppSettingsCard } from '../components/whatsapp/WhatsAppSettingsCard';
 
 export const SettingsView: React.FC = () => {
   const { activeRestaurant, activeRestaurantId, user, userProfile, hasRole } = useAuth();
@@ -309,6 +310,9 @@ export const SettingsView: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Official WhatsApp Business Platform Integration */}
+      <WhatsAppSettingsCard />
 
       {/* Team Members & Role Permissions */}
       <div className="bg-white rounded-xl border border-stone-200 p-6 shadow-2xs space-y-4">

@@ -352,6 +352,56 @@
         "updatedAt": { "type": "string" }
       },
       "required": ["id", "restaurantId", "status"]
+    },
+    "WhatsAppSettings": {
+      "title": "WhatsAppSettings",
+      "description": "Tenant-isolated official WhatsApp Business Platform credentials and status",
+      "type": "object",
+      "properties": {
+        "connected": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["CONNECTED", "DISCONNECTED", "CONFIGURATION_ERROR", "AUTH_ERROR", "RATE_LIMITED", "SERVER_ERROR", "UNKNOWN"] },
+        "businessPhoneNumber": { "type": "string" },
+        "phoneNumberId": { "type": "string" },
+        "businessAccountId": { "type": "string" },
+        "connectedByUid": { "type": "string" },
+        "connectedByName": { "type": "string" },
+        "connectedAt": { "type": "string" },
+        "lastWebhookAt": { "type": "string" },
+        "lastSuccessfulMessageAt": { "type": "string" },
+        "healthStatus": { "type": "string", "enum": ["HEALTHY", "DEGRADED", "UNHEALTHY", "DISCONNECTED"] },
+        "lastHealthCheckAt": { "type": "string" },
+        "lastError": { "type": "string" },
+        "webhookVerifyToken": { "type": "string" }
+      },
+      "required": ["connected", "status", "healthStatus"]
+    },
+    "WhatsAppMessage": {
+      "title": "WhatsAppMessage",
+      "description": "WhatsApp Business Cloud API outgoing message records and webhook delivery audit",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "restaurantId": { "type": "string" },
+        "purchaseOrderId": { "type": "string" },
+        "poNumber": { "type": "string" },
+        "vendorId": { "type": "string" },
+        "vendorName": { "type": "string" },
+        "vendorPhone": { "type": "string" },
+        "messageId": { "type": "string" },
+        "status": { "type": "string", "enum": ["QUEUED", "SENDING", "SENT", "DELIVERED", "READ", "FAILED"] },
+        "messageBody": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "sentAt": { "type": "string" },
+        "deliveredAt": { "type": "string" },
+        "readAt": { "type": "string" },
+        "failedAt": { "type": "string" },
+        "errorCode": { "type": "string" },
+        "errorMessage": { "type": "string" },
+        "isTestMessage": { "type": "boolean" },
+        "sentByUid": { "type": "string" },
+        "sentByName": { "type": "string" }
+      },
+      "required": ["id", "restaurantId", "messageId", "status", "createdAt"]
     }
   },
   "firestore": {
@@ -422,6 +472,14 @@
     "/restaurants/{restaurantId}/subscriptions/{subscriptionId}": {
       "schema": "Subscription",
       "description": "Tenant subscription status"
+    },
+    "/restaurants/{restaurantId}/settings/whatsapp": {
+      "schema": "WhatsAppSettings",
+      "description": "Tenant official WhatsApp Business Platform configuration"
+    },
+    "/restaurants/{restaurantId}/whatsappMessages/{messageId}": {
+      "schema": "WhatsAppMessage",
+      "description": "WhatsApp outgoing PO and test messages with delivery statuses"
     }
   }
 }

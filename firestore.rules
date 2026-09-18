@@ -211,10 +211,22 @@ service cloud.firestore {
         allow delete: if isRestaurantOwner(restaurantId);
       }
 
-      // Settings (e.g. POS integration configuration)
+      // Settings (e.g. POS integration configuration, WhatsApp)
+      match /settings/whatsapp {
+        allow get, list: if isMemberOfRestaurant(restaurantId);
+        allow create, update, delete: if isRestaurantOwner(restaurantId);
+      }
+
       match /settings/{settingId} {
         allow get, list: if isMemberOfRestaurant(restaurantId);
         allow create, update, delete: if isRestaurantManager(restaurantId);
+      }
+
+      // WhatsApp Message Records & Audit Trail
+      match /whatsappMessages/{messageId} {
+        allow get, list: if isMemberOfRestaurant(restaurantId);
+        allow create, update: if isStorekeeper(restaurantId);
+        allow delete: if isRestaurantOwner(restaurantId);
       }
 
       // Recipe BOMs for POS reconciliation
