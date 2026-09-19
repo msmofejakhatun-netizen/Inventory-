@@ -29,6 +29,7 @@ import { SubscriptionView } from './views/SubscriptionView';
 import { AuditLogsView } from './views/AuditLogsView';
 import { SettingsView } from './views/SettingsView';
 import { LoadingScreen } from './components/loading/LoadingScreen';
+import { OfflineBanner } from './components/pwa/OfflineBanner';
 
 const AppContent: React.FC = () => {
   const {
@@ -63,18 +64,29 @@ const AppContent: React.FC = () => {
 
   // Not signed in
   if (!user) {
-    return <AuthView />;
+    return (
+      <>
+        <OfflineBanner />
+        <AuthView />
+      </>
+    );
   }
 
   // Signed in, but no restaurant created yet -> Onboarding
   const hasRestaurants = (userRestaurants?.length ?? 0) > 0;
   if (!hasRestaurants || !activeRestaurant) {
-    return <OnboardingView />;
+    return (
+      <>
+        <OfflineBanner />
+        <OnboardingView />
+      </>
+    );
   }
 
   // Main SaaS layout
   return (
     <div className="flex h-screen bg-stone-100/70 text-stone-900 overflow-hidden font-sans">
+      <OfflineBanner />
       {/* Sidebar navigation */}
       <Sidebar
         currentTab={activeTab}

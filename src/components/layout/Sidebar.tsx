@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { UserRole } from '../../types';
+import { SidebarInstallButton } from '../pwa/SidebarInstallButton';
 
 export type NavTab =
   | 'dashboard'
@@ -220,6 +221,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
             );
           })}
         </div>
+
+        {/* PWA Install Action if supported by browser */}
+        <SidebarInstallButton />
 
         {/* Subscription trial strip */}
         <div className="p-3 border-t border-stone-800 text-[11px] bg-stone-950/40">

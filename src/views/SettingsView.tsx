@@ -37,6 +37,7 @@ import {
 import { Modal } from '../components/common/Modal';
 import { Badge } from '../components/common/Badge';
 import { WhatsAppSettingsCard } from '../components/whatsapp/WhatsAppSettingsCard';
+import { PWAInstallCard } from '../components/pwa/PWAInstallCard';
 
 export interface DisplayMember {
   id: string;
@@ -555,6 +556,9 @@ export const SettingsView: React.FC = () => {
 
       {/* Official WhatsApp Business Platform Integration */}
       <WhatsAppSettingsCard />
+
+      {/* Progressive Web App & Device Installation */}
+      <PWAInstallCard />
 
       {/* Team Members & Role Permissions */}
       <div className="bg-white rounded-xl border border-stone-200 p-6 shadow-2xs space-y-5">

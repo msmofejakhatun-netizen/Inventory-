@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { NotificationDrawer } from './NotificationDrawer';
+import { PWAInstallMenuItem } from '../pwa/PWAInstallMenuItem';
 
 interface HeaderProps {
   onToggleMobileMenu: () => void;
@@ -181,6 +182,7 @@ export const Header: React.FC<HeaderProps> = ({
                     <span>Status</span>
                     <span className="text-emerald-600 font-medium">Active Account</span>
                   </div>
+                  <PWAInstallMenuItem onActionComplete={() => setIsUserMenuOpen(false)} />
                 </div>
                 <div className="border-t border-stone-100 my-1" />
                 <button
