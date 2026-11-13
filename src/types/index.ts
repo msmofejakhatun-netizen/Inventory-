@@ -405,12 +405,24 @@ export interface AuditLog {
   createdAt: string;
 }
 
-export type SubscriptionStatus = 'trialing' | 'active' | 'past_due' | 'cancelled' | 'expired';
+export type SubscriptionStatus =
+  | 'trialing'
+  | 'active'
+  | 'past_due'
+  | 'cancelled'
+  | 'expired'
+  | 'TRIAL'
+  | 'ACTIVE'
+  | 'PENDING'
+  | 'PAYMENT_FAILED'
+  | 'CANCELLED'
+  | 'EXPIRED';
 
 export interface Subscription {
   id: string;
   restaurantId: string;
   planId: string;
+  planName?: string;
   status: SubscriptionStatus;
   startDate: string;
   trialEndDate: string;
@@ -418,7 +430,14 @@ export interface Subscription {
   currentPeriodEnd: string;
   cancelAtPeriodEnd: boolean;
   amount: number;
+  amountInPaise?: number;
   currency: string;
+  billingCycle?: 'MONTHLY';
+  razorpaySubscriptionId?: string;
+  razorpayOrderId?: string;
+  razorpayPaymentId?: string;
+  lastVerifiedPaymentAt?: string;
+  renewalNoticeAccepted?: boolean;
   createdAt: string;
   updatedAt: string;
 }

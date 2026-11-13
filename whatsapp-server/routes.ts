@@ -295,7 +295,7 @@ whatsappRouter.get('/po-image/:restaurantId/:purchaseOrderId.png', async (req: R
     const restDocRef = doc(db, 'restaurants', restaurantId);
     const restSnap = await getDoc(restDocRef);
     const restaurant = restSnap.data() as Restaurant | undefined;
-    const restaurantName = restaurant?.name || 'Restaurant Store Control';
+    const restaurantName = restaurant?.name || 'STOQO';
 
     const { buffer, filename } = generateServerPoImageBuffer(po, restaurantName);
 
@@ -398,7 +398,7 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
     }
 
     // Fetch restaurant name
-    let restaurantName = 'Restaurant Store Control';
+    let restaurantName = 'STOQO';
     try {
       const restDocRef = doc(db, 'restaurants', restaurantId);
       const restSnap = await getDoc(restDocRef);
@@ -594,7 +594,7 @@ whatsappRouter.post('/test-message', async (req: Request, res: Response) => {
       });
     }
 
-    const restaurantName = restaurant?.name || 'Restaurant Store Control';
+    const restaurantName = restaurant?.name || 'STOQO';
     const testBody = `✅ WhatsApp Business Connection Test\n\nRestaurant: ${restaurantName}\nStatus: Verified & Operational\nDispatched: ${new Date().toLocaleString('en-IN')}\n\nYour restaurant's official WhatsApp Business Platform integration is active and ready to transmit Purchase Orders.`;
 
     const metaResult = await sendMetaCloudApiMessage({

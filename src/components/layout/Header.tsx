@@ -15,6 +15,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { NotificationDrawer } from './NotificationDrawer';
 import { PWAInstallMenuItem } from '../pwa/PWAInstallMenuItem';
+import { StoqoLogo, StoqoIcon } from '../brand/StoqoLogo';
 
 interface HeaderProps {
   onToggleMobileMenu: () => void;
@@ -53,6 +54,11 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Menu className="w-5 h-5" />
           </button>
+
+          {/* Compact STOQO Brand on Mobile/Tablet */}
+          <div className="lg:hidden flex items-center">
+            <StoqoLogo variant="compact" theme="light" size="sm" showTagline={false} />
+          </div>
 
           {/* Restaurant Switcher */}
           <div className="relative">
@@ -178,6 +184,12 @@ export const Header: React.FC<HeaderProps> = ({
                   </span>
                 </div>
                 <div className="py-1">
+                  <div className="px-3 py-1.5 text-[11px] text-stone-500 flex items-center justify-between">
+                    <span>Platform</span>
+                    <span className="font-bold text-[#0D2149] flex items-center gap-1">
+                      <StoqoIcon className="w-3.5 h-3.5" /> STOQO
+                    </span>
+                  </div>
                   <div className="px-3 py-1.5 text-[11px] text-stone-500 flex items-center justify-between">
                     <span>Status</span>
                     <span className="text-emerald-600 font-medium">Active Account</span>

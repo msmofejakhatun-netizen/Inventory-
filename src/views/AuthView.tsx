@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { ShieldCheck, Phone, CheckCircle2, ArrowRight, AlertCircle, Loader2 } from 'lucide-react';
 import { ConfirmationResult } from 'firebase/auth';
 import { useAuth } from '../context/AuthContext';
+import { StoqoLogo } from '../components/brand/StoqoLogo';
 
 export const AuthView: React.FC = () => {
   const { loginWithGoogle, setUpPhoneRecaptcha, sendPhoneOtp, error: authError } = useAuth();
@@ -76,17 +77,9 @@ export const AuthView: React.FC = () => {
       <div id="recaptcha-container"></div>
 
       <div className="sm:mx-auto sm:w-full sm:max-w-md text-center">
-        <div className="w-14 h-14 bg-amber-500 rounded-2xl mx-auto flex items-center justify-center text-stone-950 font-black text-xl shadow-md">
-          RC
-        </div>
-        <h1 className="mt-4 text-2xl font-black text-stone-900 tracking-tight sm:text-3xl">
-          RESTAURANT STORE CONTROL SYSTEM
-        </h1>
-        <p className="mt-2 text-sm font-semibold text-amber-700 tracking-wide uppercase">
-          "Know your stock. Control your cash."
-        </p>
-        <p className="mt-1 text-xs text-stone-500">
-          Raw material inventory, purchase price control, and kitchen consumption audit SaaS
+        <StoqoLogo variant="full" theme="light" size="lg" showTagline={true} />
+        <p className="mt-2 text-xs text-stone-500">
+          Restaurant Inventory & Store Management SaaS
         </p>
       </div>
 
@@ -253,7 +246,7 @@ export const AuthView: React.FC = () => {
               </div>
               <div className="flex items-center gap-2">
                 <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
-                <span>14-day full access trial included (₹99/mo)</span>
+                <span>14-day full access trial included (₹799/mo)</span>
               </div>
             </div>
           </div>

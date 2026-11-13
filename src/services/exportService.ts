@@ -38,7 +38,7 @@ export function exportToPdf(
   // Header
   doc.setFontSize(18);
   doc.setFont('helvetica', 'bold');
-  doc.text('RESTAURANT STORE CONTROL SYSTEM', 14, 18);
+  doc.text('STOQO — Smart Stock. Smarter Business.', 14, 18);
 
   doc.setFontSize(12);
   doc.setFont('helvetica', 'normal');
@@ -237,7 +237,7 @@ export function exportPurchaseOrderPdf(
   doc.setFontSize(8);
   doc.setFont('helvetica', 'normal');
   doc.setTextColor(100, 100, 100);
-  doc.text('Generated via Restaurant Store Control System. All rates subject to invoice verification upon store entry.', 14, startY);
+  doc.text('Generated via STOQO. All rates subject to invoice verification upon store entry.', 14, startY);
   doc.text('Authorized Signature / Store Manager: _______________________________', 14, startY + 12);
 
   doc.save(`${po.poNumber}_${po.vendorName.replace(/\s+/g, '_')}.pdf`);

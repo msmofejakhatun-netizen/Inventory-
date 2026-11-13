@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { Boxes, Package, Cloud, ShieldCheck, RefreshCw, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { Package, Cloud, ShieldCheck, RefreshCw, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { StoqoIcon } from '../brand/StoqoLogo';
 
 export type LoadingStage = 'connecting' | 'authenticating' | 'fetching_data' | 'syncing_inventory' | 'ready';
 
@@ -324,36 +325,33 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({
             }}
           />
 
-          {/* 4. Center Logo Container: Premium rounded-square container with warm amber/golden glow */}
+          {/* 4. Center Logo Container: STOQO Official Brand Icon */}
           <div
             id="loading-logo-container"
-            className="relative z-10 w-24 h-24 sm:w-28 sm:h-28 rounded-2xl bg-gradient-to-br from-amber-400 via-amber-500 to-amber-600 text-stone-950 flex flex-col items-center justify-center p-2 border border-amber-300/40"
+            className="relative z-10 w-24 h-24 sm:w-28 sm:h-28 rounded-3xl flex items-center justify-center"
             style={{
               animation: 'pulse-glow 2.8s ease-in-out infinite',
             }}
           >
-            {/* Store Boxes Icon */}
-            <Boxes className="w-7 h-7 sm:w-8 sm:h-8 text-stone-950 stroke-[2.2] mb-0.5 drop-shadow-xs" />
-            {/* Existing RC Monogram */}
-            <span className="text-xl sm:text-2xl font-black tracking-tight leading-none text-stone-950 drop-shadow-xs">
-              RC
-            </span>
+            <StoqoIcon className="w-24 h-24 sm:w-28 sm:h-28 drop-shadow-lg" />
           </div>
         </div>
 
         {/* MAIN BRAND TEXT */}
         <div className="space-y-0.5">
-          <h1 className="text-xl sm:text-2xl md:text-3xl font-black text-white tracking-[0.2em] uppercase leading-tight">
-            RESTAURANT STORE
+          <h1 className="text-3xl sm:text-4xl md:text-5xl font-black tracking-[0.14em] uppercase leading-tight">
+            <span className="text-white">STO</span>
+            <span className="text-[#FF5A1F]">Q</span>
+            <span className="text-white">O</span>
           </h1>
-          <h2 className="text-xl sm:text-2xl md:text-3xl font-black text-amber-400 tracking-[0.2em] uppercase leading-tight bg-gradient-to-r from-amber-400 via-amber-300 to-amber-500 bg-clip-text text-transparent">
-            CONTROL SYSTEM
+          <h2 className="text-xs sm:text-sm font-bold text-stone-300 tracking-[0.18em] uppercase leading-tight mt-1">
+            Restaurant Inventory & Store Management SaaS
           </h2>
         </div>
 
         {/* Tagline */}
-        <p className="text-[10px] sm:text-xs font-bold text-amber-100/75 tracking-[0.26em] uppercase mt-2.5">
-          "KNOW YOUR STOCK. CONTROL YOUR CASH."
+        <p className="text-[11px] sm:text-xs font-bold text-[#FF7A29] tracking-[0.24em] uppercase mt-2.5">
+          "SMART STOCK. SMARTER BUSINESS."
         </p>
 
         {/* Thin warm amber horizontal divider */}

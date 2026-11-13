@@ -1,5 +1,6 @@
 import React from 'react';
 import { Share, PlusSquare, X } from 'lucide-react';
+import { StoqoIcon } from '../brand/StoqoLogo';
 
 interface IOSInstallModalProps {
   isOpen: boolean;
@@ -22,12 +23,10 @@ export const IOSInstallModal: React.FC<IOSInstallModalProps> = ({ isOpen, onClos
       >
         <div className="flex items-center justify-between pb-2 border-b border-stone-800">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-amber-500 text-stone-950 font-bold flex items-center justify-center text-sm shadow-xs">
-              RC
-            </div>
+            <StoqoIcon className="w-8 h-8" />
             <div>
-              <h3 className="text-sm font-bold text-white leading-tight">Install on iPhone / iPad</h3>
-              <p className="text-[10px] text-amber-400 font-medium">Add to Home Screen for standalone app mode</p>
+              <h3 className="text-sm font-bold text-white leading-tight">Install STOQO on iPhone / iPad</h3>
+              <p className="text-[10px] text-[#FF7A29] font-medium">Smart Stock. Smarter Business.</p>
             </div>
           </div>
           <button
@@ -71,7 +70,7 @@ export const IOSInstallModal: React.FC<IOSInstallModalProps> = ({ isOpen, onClos
             <div>
               <p className="font-semibold text-white">3. Tap "Add" in top-right</p>
               <p className="text-[11px] text-stone-400 mt-0.5">
-                Confirm by tapping <span className="text-stone-200 font-medium">Add</span>. The Restaurant Store icon will appear on your home screen.
+                Confirm by tapping <span className="text-stone-200 font-medium">Add</span>. The STOQO icon will appear on your home screen.
               </p>
             </div>
           </div>

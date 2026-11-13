@@ -34,7 +34,7 @@ export function generateServerPoImageBuffer(
       });
 
   const data: PoImageData = {
-    restaurantName: restaurantName || 'Restaurant Store Control',
+    restaurantName: restaurantName || 'STOQO',
     vendorName: po.vendorName || 'Supplier',
     poNumber: po.poNumber || 'PO',
     poDate,

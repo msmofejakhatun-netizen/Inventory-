@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Store, Globe, Layers, CheckCircle, ArrowRight, Loader2, Plus, X } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { createRestaurantWithDefaults } from '../services/restaurantService';
+import { StoqoLogo } from '../components/brand/StoqoLogo';
 
 interface OnboardingViewProps {
   onComplete?: () => void;
@@ -137,11 +138,9 @@ export const OnboardingView: React.FC<OnboardingViewProps> = ({ onComplete }) =>
   return (
     <div className="min-h-screen bg-stone-100 flex flex-col justify-center py-12 px-4 sm:px-6 lg:px-8">
       <div className="sm:mx-auto sm:w-full sm:max-w-xl text-center">
-        <div className="w-12 h-12 bg-amber-500 rounded-xl mx-auto flex items-center justify-center text-stone-950 font-black shadow-xs mb-3">
-          RC
-        </div>
-        <h2 className="text-2xl font-black text-stone-900 tracking-tight">
-          Welcome to Restaurant Store Control
+        <StoqoLogo variant="full" theme="light" size="md" showTagline={true} />
+        <h2 className="mt-3 text-2xl font-black text-stone-900 tracking-tight">
+          Welcome to STOQO
         </h2>
         <p className="mt-1 text-sm text-stone-600">
           Setup your outlet profile, regional taxes, and kitchen departments in 2 minutes.
@@ -387,7 +386,7 @@ export const OnboardingView: React.FC<OnboardingViewProps> = ({ onComplete }) =>
                   className="flex items-center gap-2 px-6 py-2.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-sm font-semibold transition-colors shadow-xs disabled:opacity-50"
                 >
                   {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
-                  <span>Launch Restaurant Store</span>
+                  <span>Launch STOQO Store</span>
                 </button>
               </div>
             </div>

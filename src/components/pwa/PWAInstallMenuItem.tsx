@@ -49,7 +49,7 @@ export const PWAInstallMenuItem: React.FC<PWAInstallMenuItemProps> = ({
       >
         <div className="flex items-center gap-2">
           <Download className="w-3.5 h-3.5 text-amber-600" />
-          <span>Install Store App</span>
+          <span>Install STOQO App</span>
         </div>
         <span className="text-[10px] bg-amber-100 text-amber-800 font-semibold px-1.5 py-0.5 rounded">
           PWA

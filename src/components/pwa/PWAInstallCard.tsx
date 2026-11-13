@@ -30,7 +30,7 @@ export const PWAInstallCard: React.FC = () => {
 
       <div className="space-y-3 text-xs text-stone-600">
         <p>
-          Install <strong>Restaurant Store Control System</strong> directly on your Android phone, tablet,
+          Install <strong>STOQO</strong> (<em>Smart Stock. Smarter Business.</em>) directly on your Android phone, tablet,
           Windows PC, or macOS device for standalone execution without a browser address bar.
         </p>
 

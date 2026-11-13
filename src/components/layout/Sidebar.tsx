@@ -24,6 +24,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { UserRole } from '../../types';
 import { SidebarInstallButton } from '../pwa/SidebarInstallButton';
+import { StoqoLogo } from '../brand/StoqoLogo';
 
 export type NavTab =
   | 'dashboard'
@@ -113,7 +114,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         { id: 'pos_integration', label: 'POS Integration (Petpooja/eZee)', icon: ArrowRightLeft, allowedRoles: ['OWNER', 'MANAGER'] },
         { id: 'staff', label: 'Staff & Roles', icon: Users, allowedRoles: ['OWNER', 'MANAGER'] },
         { id: 'audit_logs', label: 'Audit Trail', icon: History, allowedRoles: ['OWNER', 'MANAGER'] },
-        { id: 'subscription', label: 'Subscription (₹99/mo)', icon: ShieldCheck, allowedRoles: ['OWNER'] },
+        { id: 'subscription', label: 'Subscription (₹799/mo)', icon: ShieldCheck, allowedRoles: ['OWNER'] },
         { id: 'settings', label: 'Settings', icon: Settings, allowedRoles: ['OWNER', 'MANAGER'] },
       ],
     },
@@ -141,19 +142,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       >
         {/* Brand Header */}
         <div className="p-4 border-b border-stone-800 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-lg bg-amber-500 flex items-center justify-center text-stone-950 font-bold shadow-xs">
-              RC
-            </div>
-            <div>
-              <h1 className="text-sm font-bold text-white tracking-tight leading-none">
-                STORE CONTROL
-              </h1>
-              <p className="text-[10px] text-amber-400 font-medium mt-1">
-                Know stock. Control cash.
-              </p>
-            </div>
-          </div>
+          <StoqoLogo variant="compact" theme="dark" size="md" showTagline={true} />
         </div>
 
         {/* Tenant Active Badge */}
@@ -228,7 +217,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         {/* Subscription trial strip */}
         <div className="p-3 border-t border-stone-800 text-[11px] bg-stone-950/40">
           <div className="flex items-center justify-between text-stone-400">
-            <span>₹99/mo Pro SaaS</span>
+            <span>₹799/mo Pro SaaS</span>
             <span className="text-emerald-400 font-medium">14-Day Trial</span>
           </div>
         </div>

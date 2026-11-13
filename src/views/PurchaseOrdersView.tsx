@@ -332,7 +332,7 @@ export const PurchaseOrdersView: React.FC = () => {
   // WHATSAPP WORKFLOW (STRICTLY ONLY ITEM + QUANTITY + UNIT • NO PRICES/RATES/AMOUNTS)
   // -------------------------------------------------------------------------
   const generateWhatsAppMessage = (po: PurchaseOrder, vendorName: string) => {
-    const storeName = activeRestaurant?.name || 'Restaurant Store Control';
+    const storeName = activeRestaurant?.name || 'STOQO';
     const poDate = po.createdAt
       ? new Date(po.createdAt).toLocaleDateString('en-IN')
       : new Date().toLocaleDateString('en-IN');

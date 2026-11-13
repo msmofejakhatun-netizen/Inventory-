@@ -284,7 +284,7 @@ export function drawExcelPoSheet(
   ctx.fillText(`TOTAL ITEMS: ${items.length}`, tableLeft + 16, footerY);
 
   ctx.textAlign = 'right';
-  ctx.fillText('Generated via Restaurant Store Control', tableRight - 16, footerY);
+  ctx.fillText('Generated via STOQO', tableRight - 16, footerY);
 
   ctx.restore();
 }
@@ -325,7 +325,7 @@ export async function generateClientPoImage(
       });
 
   const data: PoImageData = {
-    restaurantName: restaurantName || 'Restaurant Store Control',
+    restaurantName: restaurantName || 'STOQO',
     vendorName: po.vendorName || 'Supplier',
     poNumber: po.poNumber || 'PO',
     poDate,

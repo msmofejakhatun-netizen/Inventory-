@@ -38,12 +38,11 @@ export default defineConfig(() => {
         ],
         manifest: {
           id: '/',
-          name: 'Restaurant Store Control System',
-          short_name: 'StoreControl',
-          description:
-            'Know your stock. Control your cash. Restaurant inventory, purchase, vendor payment, consumption, wastage, stock control and AI purchase planning SaaS.',
-          theme_color: '#1c1917',
-          background_color: '#0c0a09',
+          name: 'STOQO',
+          short_name: 'STOQO',
+          description: 'Smart Stock. Smarter Business.',
+          theme_color: '#0D2149',
+          background_color: '#07132B',
           display: 'standalone',
           orientation: 'portrait-primary',
           start_url: '/',
@@ -71,6 +70,7 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2,json}'],
           navigateFallback: '/index.html',
           navigateFallbackDenylist: [/^\/api/],

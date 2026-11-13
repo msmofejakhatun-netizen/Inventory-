@@ -26,7 +26,7 @@ export const SidebarInstallButton: React.FC = () => {
       >
         <div className="flex items-center gap-2">
           <Download className="w-3.5 h-3.5 text-amber-400 group-hover:scale-110 transition-transform" />
-          <span>Install App</span>
+          <span>Install STOQO App</span>
         </div>
         <span className="text-[10px] bg-amber-500/30 text-amber-200 px-1.5 py-0.2 rounded font-mono">
           PWA

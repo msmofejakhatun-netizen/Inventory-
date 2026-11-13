@@ -32,5 +32,5 @@ app.get('*', (req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Restaurant Store Control System running on port ${PORT}`);
+  console.log(`STOQO running on port ${PORT}`);
 });
