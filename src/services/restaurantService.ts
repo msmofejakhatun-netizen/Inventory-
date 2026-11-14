@@ -2273,3 +2273,310 @@ export async function activatePendingInvitationsForUser(user: {
   return syncUserAuthorizations(user);
 }
 
+// ============================================================================
+// INVENTORY ITEM SAFE DELETE & BULK DELETE (WITH DEPENDENCY & STOCK GUARD)
+// ============================================================================
+
+export type ItemDeleteOutcome = 'DELETED' | 'ARCHIVED' | 'FAILED';
+
+export interface ItemDeleteResultItem {
+  itemId: string;
+  itemName: string;
+  outcome: ItemDeleteOutcome;
+  reasons: string[];
+  error?: string;
+}
+
+export interface BulkItemDeleteResult {
+  deleted: ItemDeleteResultItem[];
+  archived: ItemDeleteResultItem[];
+  failed: ItemDeleteResultItem[];
+}
+
+/**
+ * Checks all tenant-scoped collections for historical or active references to the given item IDs.
+ * Never mutates or deletes any transaction records.
+ */
+async function collectItemDependencies(
+  restaurantId: string,
+  targetItemIds: Set<string>
+): Promise<Map<string, Set<string>>> {
+  const refsByItem = new Map<string, Set<string>>();
+  const addRef = (itemId: string | undefined, label: string) => {
+    if (!itemId || !targetItemIds.has(itemId)) return;
+    if (!refsByItem.has(itemId)) {
+      refsByItem.set(itemId, new Set());
+    }
+    refsByItem.get(itemId)!.add(label);
+  };
+
+  const [
+    stockTxSnap,
+    issuesSnap,
+    emergencySnap,
+    wastageSnap,
+    stockCountsSnap,
+    purchasesSnap,
+    poSnap,
+    recipesSnap,
+  ] = await Promise.all([
+    getDocs(getTenantCol(restaurantId, 'stockTransactions')),
+    getDocs(getTenantCol(restaurantId, 'issues')),
+    getDocs(getTenantCol(restaurantId, 'emergencyIssues')),
+    getDocs(getTenantCol(restaurantId, 'wastage')),
+    getDocs(getTenantCol(restaurantId, 'stockCounts')),
+    getDocs(getTenantCol(restaurantId, 'purchases')),
+    getDocs(getTenantCol(restaurantId, 'purchaseOrders')),
+    getDocs(getTenantCol(restaurantId, 'recipes')),
+  ]);
+
+  stockTxSnap.forEach((d) => {
+    const data = d.data() as StockTransaction;
+    addRef(data.itemId, 'Inventory transaction history');
+  });
+
+  issuesSnap.forEach((d) => {
+    const data = d.data() as Issue;
+    addRef(data.itemId, 'Stock Issues');
+  });
+
+  emergencySnap.forEach((d) => {
+    const data = d.data() as EmergencyIssue;
+    addRef(data.itemId, 'Emergency Stock Issues');
+  });
+
+  wastageSnap.forEach((d) => {
+    const data = d.data() as Wastage;
+    addRef(data.itemId, 'Wastage records');
+  });
+
+  stockCountsSnap.forEach((d) => {
+    const data = d.data() as StockCount;
+    addRef(data.itemId, 'Physical Audits');
+  });
+
+  purchasesSnap.forEach((d) => {
+    const data = d.data() as Purchase;
+    if (Array.isArray(data.items)) {
+      for (const row of data.items) {
+        addRef(row?.itemId, 'Purchase Invoices / Stock Inward');
+      }
+    }
+  });
+
+  poSnap.forEach((d) => {
+    const data = d.data() as PurchaseOrder;
+    if (Array.isArray(data.items)) {
+      for (const row of data.items) {
+        addRef(row?.itemId, 'Purchase Orders');
+      }
+    }
+  });
+
+  recipesSnap.forEach((d) => {
+    const data = d.data() as { ingredients?: Array<{ itemId?: string }> };
+    if (Array.isArray(data.ingredients)) {
+      for (const ing of data.ingredients) {
+        addRef(ing?.itemId, 'Recipe / BOM records');
+      }
+    }
+  });
+
+  return refsByItem;
+}
+
+/**
+ * Safely deletes or archives one or more inventory items within a single restaurant tenant.
+ * - Permanent delete ONLY when currentStock === 0 AND zero historical/dependent references exist.
+ * - Otherwise archives the item (status = 'inactive') while keeping all history intact.
+ * - Enforces role check (OWNER / MANAGER) and restaurantId isolation.
+ */
+export async function bulkDeleteInventoryItemsSafely(params: {
+  restaurantId: string;
+  itemsToDelete: Item[];
+  actorUid: string;
+  actorName: string;
+  actorRole: UserRole | null;
+}): Promise<BulkItemDeleteResult> {
+  const { restaurantId, itemsToDelete, actorUid, actorName, actorRole } = params;
+
+  const result: BulkItemDeleteResult = {
+    deleted: [],
+    archived: [],
+    failed: [],
+  };
+
+  if (!restaurantId || !itemsToDelete || itemsToDelete.length === 0) {
+    return result;
+  }
+
+  // Frontend RBAC defense-in-depth (also enforced in firestore.rules)
+  if (actorRole !== 'OWNER' && actorRole !== 'MANAGER') {
+    for (const item of itemsToDelete) {
+      result.failed.push({
+        itemId: item.id,
+        itemName: item.name,
+        outcome: 'FAILED',
+        reasons: [],
+        error: 'Permission denied: Only Owner or Manager can delete inventory items.',
+      });
+    }
+    return result;
+  }
+
+  const targetIds = new Set(itemsToDelete.map((i) => i.id));
+
+  let refsByItem: Map<string, Set<string>>;
+  try {
+    refsByItem = await collectItemDependencies(restaurantId, targetIds);
+  } catch (err: any) {
+    const errMsg = err?.message || 'Failed to verify item transaction dependencies.';
+    for (const item of itemsToDelete) {
+      result.failed.push({
+        itemId: item.id,
+        itemName: item.name,
+        outcome: 'FAILED',
+        reasons: [],
+        error: errMsg,
+      });
+    }
+    return result;
+  }
+
+  const now = new Date().toISOString();
+
+  for (const item of itemsToDelete) {
+    // Enforce strict restaurantId isolation
+    if (item.restaurantId && item.restaurantId !== restaurantId) {
+      result.failed.push({
+        itemId: item.id,
+        itemName: item.name,
+        outcome: 'FAILED',
+        reasons: [],
+        error: 'Tenant isolation check failed: Item does not belong to the active restaurant.',
+      });
+      continue;
+    }
+
+    const itemRef = getTenantDoc(restaurantId, 'items', item.id);
+
+    try {
+      // Re-fetch authoritative item doc from Firestore to verify live stock & restaurantId
+      const liveSnap = await getDoc(itemRef);
+      if (!liveSnap.exists()) {
+        result.failed.push({
+          itemId: item.id,
+          itemName: item.name,
+          outcome: 'FAILED',
+          reasons: [],
+          error: 'Item no longer exists in inventory.',
+        });
+        continue;
+      }
+
+      const liveItem = liveSnap.data() as Item;
+      if (liveItem.restaurantId && liveItem.restaurantId !== restaurantId) {
+        result.failed.push({
+          itemId: item.id,
+          itemName: item.name,
+          outcome: 'FAILED',
+          reasons: [],
+          error: 'Tenant isolation check failed: Cross-restaurant access blocked.',
+        });
+        continue;
+      }
+
+      const reasons: string[] = [];
+      const liveStock = Number(liveItem.currentStock || 0);
+      if (Math.abs(liveStock) > 0) {
+        reasons.push(`Active stock on hand (${liveStock} ${liveItem.unit})`);
+      }
+
+      const depSet = refsByItem.get(item.id);
+      if (depSet && depSet.size > 0) {
+        depSet.forEach((label) => reasons.push(label));
+      }
+
+      if (reasons.length === 0) {
+        // Safe to permanently delete: 0 stock and 0 historical/dependent references
+        await deleteDoc(itemRef);
+        await logAuditEvent(
+          restaurantId,
+          actorUid,
+          actorName,
+          'INVENTORY_ITEM_DELETED',
+          'Item',
+          item.id,
+          `Permanently deleted unused inventory item "${liveItem.name}" (${liveItem.category}, 0 ${liveItem.unit})`
+        );
+        result.deleted.push({
+          itemId: item.id,
+          itemName: liveItem.name,
+          outcome: 'DELETED',
+          reasons: [],
+        });
+      } else {
+        // Archive / Deactivate instead of permanently deleting to preserve historical records & reports
+        await updateDoc(itemRef, {
+          status: 'inactive',
+          updatedAt: now,
+        });
+        await logAuditEvent(
+          restaurantId,
+          actorUid,
+          actorName,
+          'INVENTORY_ITEM_ARCHIVED',
+          'Item',
+          item.id,
+          `Archived inventory item "${liveItem.name}" (preserved historical data: ${reasons.join(', ')})`
+        );
+        result.archived.push({
+          itemId: item.id,
+          itemName: liveItem.name,
+          outcome: 'ARCHIVED',
+          reasons,
+        });
+      }
+    } catch (err: any) {
+      result.failed.push({
+        itemId: item.id,
+        itemName: item.name,
+        outcome: 'FAILED',
+        reasons: [],
+        error: err?.message || 'Permission denied or network failure while deleting item.',
+      });
+    }
+  }
+
+  return result;
+}
+
+export async function deleteInventoryItemSafely(params: {
+  restaurantId: string;
+  item: Item;
+  actorUid: string;
+  actorName: string;
+  actorRole: UserRole | null;
+}): Promise<ItemDeleteResultItem> {
+  const bulkRes = await bulkDeleteInventoryItemsSafely({
+    restaurantId: params.restaurantId,
+    itemsToDelete: [params.item],
+    actorUid: params.actorUid,
+    actorName: params.actorName,
+    actorRole: params.actorRole,
+  });
+
+  return (
+    bulkRes.deleted[0] ||
+    bulkRes.archived[0] ||
+    bulkRes.failed[0] || {
+      itemId: params.item.id,
+      itemName: params.item.name,
+      outcome: 'FAILED',
+      reasons: [],
+      error: 'Unexpected error deleting inventory item.',
+    }
+  );
+}
+
+

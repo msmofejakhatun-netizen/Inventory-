@@ -1,16 +1,19 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef, useMemo } from 'react';
 import {
-  Boxes,
   Search,
-  Filter,
   Plus,
   Download,
   Upload,
   AlertTriangle,
-  Lock,
   Edit2,
-  CheckCircle,
+  CheckCircle2,
   FileSpreadsheet,
+  MoreVertical,
+  Eye,
+  Trash2,
+  Archive,
+  X,
+  Loader2,
 } from 'lucide-react';
 import {
   collection,
@@ -18,9 +21,6 @@ import {
   doc,
   setDoc,
   updateDoc,
-  deleteDoc,
-  query,
-  orderBy,
   writeBatch,
 } from 'firebase/firestore';
 import { db } from '../firebase/config';
@@ -33,11 +33,25 @@ import {
   calculateExcessStock,
 } from '../services/calculations';
 import { exportToCsv, exportToPdf } from '../services/exportService';
+import {
+  deleteInventoryItemSafely,
+  bulkDeleteInventoryItemsSafely,
+  BulkItemDeleteResult,
+} from '../services/restaurantService';
 import { Modal } from '../components/common/Modal';
 import { Badge } from '../components/common/Badge';
 
+interface DeleteFeedbackNotice {
+  variant: 'success' | 'warning' | 'error';
+  title: string;
+  details: string[];
+  deletedCount?: number;
+  archivedCount?: number;
+  failedCount?: number;
+}
+
 export const StockView: React.FC = () => {
-  const { activeRestaurant, activeRestaurantId, user, userProfile, hasRole } = useAuth();
+  const { activeRestaurant, activeRestaurantId, user, userProfile, activeRole, hasRole } = useAuth();
 
   const [items, setItems] = useState<Item[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
@@ -45,14 +59,40 @@ export const StockView: React.FC = () => {
   const [issues, setIssues] = useState<Issue[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // RBAC: Owner & Manager follow inventory management permissions; Storekeeper & Dept Staff cannot delete
+  const canManageInventory = hasRole(['OWNER', 'MANAGER']);
+
   // Filters
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedDept, setSelectedDept] = useState('ALL');
   const [selectedStatus, setSelectedStatus] = useState<'ALL' | 'LOW' | 'EXCESS' | 'SUFFICIENT'>('ALL');
+  const [showArchived, setShowArchived] = useState(false);
 
   // Add / Edit Modal
   const [isItemModalOpen, setIsItemModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<Item | null>(null);
+
+  // View Item Modal
+  const [viewingItem, setViewingItem] = useState<(Item & { stockValue: number; stockDaysLabel: string; statusType: string }) | null>(null);
+
+  // Action Menu Popover (fixed positioning avoids overflow-hidden/overflow-x-auto clipping)
+  const [openMenu, setOpenMenu] = useState<{ itemId: string; top: number; right: number; openUp: boolean } | null>(null);
+
+  // Selection & Bulk Delete State
+  const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set());
+  const selectAllDesktopRef = useRef<HTMLInputElement | null>(null);
+  const selectAllMobileRef = useRef<HTMLInputElement | null>(null);
+
+  // Single Delete Confirmation State
+  const [itemPendingDelete, setItemPendingDelete] = useState<Item | null>(null);
+  const [isDeletingSingle, setIsDeletingSingle] = useState(false);
+
+  // Bulk Delete Confirmation State
+  const [isBulkDeleteModalOpen, setIsBulkDeleteModalOpen] = useState(false);
+  const [isDeletingBulk, setIsDeletingBulk] = useState(false);
+
+  // Result Feedback Banner
+  const [deleteNotice, setDeleteNotice] = useState<DeleteFeedbackNotice | null>(null);
 
   // Form fields
   const [name, setName] = useState('');
@@ -73,6 +113,13 @@ export const StockView: React.FC = () => {
   const [importStatus, setImportStatus] = useState<string | null>(null);
 
   const currencySymbol = activeRestaurant?.currencySymbol || '₹';
+
+  // Reset selection and notice when switching restaurants
+  useEffect(() => {
+    setSelectedItemIds(new Set());
+    setOpenMenu(null);
+    setDeleteNotice(null);
+  }, [activeRestaurantId]);
 
   useEffect(() => {
     if (!activeRestaurantId) return;
@@ -101,6 +148,169 @@ export const StockView: React.FC = () => {
       unsubIssues();
     };
   }, [activeRestaurantId]);
+
+  // Close action dropdown on outside click, escape, or scroll
+  useEffect(() => {
+    if (!openMenu) return;
+    const handleClose = () => setOpenMenu(null);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpenMenu(null);
+    };
+    window.addEventListener('click', handleClose);
+    window.addEventListener('scroll', handleClose, true);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('click', handleClose);
+      window.removeEventListener('scroll', handleClose, true);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [openMenu]);
+
+  const activeItemsCount = useMemo(
+    () => items.filter((i) => i.status !== 'inactive').length,
+    [items]
+  );
+
+  const archivedItemsCount = useMemo(
+    () => items.filter((i) => i.status === 'inactive').length,
+    [items]
+  );
+
+  // Filtered List with Metrics
+  const processedItems = useMemo(() => {
+    return items.map((item) => {
+      const value = calculateStockValue(item.currentStock, item.averageStockRate || item.lastPurchaseRate || 0);
+      const { avgDailyQty, hasData } = calculateAverageDailyConsumption(issues, item.id, 14);
+      const stockDaysObj = calculateStockDays(item.currentStock, avgDailyQty);
+      const excessObj = calculateExcessStock(item, avgDailyQty);
+
+      let statusType: 'LOW' | 'EXCESS' | 'SUFFICIENT' = 'SUFFICIENT';
+      if (item.minimumStock > 0 && item.currentStock <= item.minimumStock) {
+        statusType = 'LOW';
+      } else if (excessObj.isExcess) {
+        statusType = 'EXCESS';
+      }
+
+      return {
+        ...item,
+        stockValue: value,
+        avgDailyQty,
+        hasConsumptionData: hasData,
+        stockDaysLabel: stockDaysObj.label,
+        excessValue: excessObj.excessValue,
+        statusType,
+      };
+    });
+  }, [items, issues]);
+
+  const filteredItems = useMemo(() => {
+    return processedItems.filter((item) => {
+      const isArchived = item.status === 'inactive';
+      if (!showArchived && isArchived) return false;
+      const matchSearch =
+        item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        item.category.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchDept = selectedDept === 'ALL' || item.departmentId === selectedDept;
+      const matchStatus = selectedStatus === 'ALL' || item.statusType === selectedStatus;
+      return matchSearch && matchDept && matchStatus;
+    });
+  }, [processedItems, showArchived, searchQuery, selectedDept, selectedStatus]);
+
+  // Selectable items are active (non-archived) visible items
+  const selectableVisibleItems = useMemo(
+    () => filteredItems.filter((i) => i.status !== 'inactive'),
+    [filteredItems]
+  );
+
+  const selectedVisibleCount = useMemo(
+    () => selectableVisibleItems.filter((i) => selectedItemIds.has(i.id)).length,
+    [selectableVisibleItems, selectedItemIds]
+  );
+
+  const allVisibleSelected =
+    selectableVisibleItems.length > 0 && selectedVisibleCount === selectableVisibleItems.length;
+  const someVisibleSelected =
+    selectedVisibleCount > 0 && selectedVisibleCount < selectableVisibleItems.length;
+
+  useEffect(() => {
+    if (selectAllDesktopRef.current) {
+      selectAllDesktopRef.current.indeterminate = someVisibleSelected;
+    }
+    if (selectAllMobileRef.current) {
+      selectAllMobileRef.current.indeterminate = someVisibleSelected;
+    }
+  }, [someVisibleSelected]);
+
+  // Prune any selected IDs that are no longer active
+  useEffect(() => {
+    const activeIds = new Set(items.filter((i) => i.status !== 'inactive').map((i) => i.id));
+    setSelectedItemIds((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (activeIds.has(id)) {
+          next.add(id);
+        } else {
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [items]);
+
+  const selectedItemsList = useMemo(
+    () => items.filter((i) => selectedItemIds.has(i.id) && i.status !== 'inactive'),
+    [items, selectedItemIds]
+  );
+
+  const toggleSelectOne = (itemId: string) => {
+    setSelectedItemIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(itemId)) {
+        next.delete(itemId);
+      } else {
+        next.add(itemId);
+      }
+      return next;
+    });
+  };
+
+  const toggleSelectAllVisible = () => {
+    if (allVisibleSelected) {
+      setSelectedItemIds((prev) => {
+        const next = new Set(prev);
+        selectableVisibleItems.forEach((i) => next.delete(i.id));
+        return next;
+      });
+    } else {
+      setSelectedItemIds((prev) => {
+        const next = new Set(prev);
+        selectableVisibleItems.forEach((i) => next.add(i.id));
+        return next;
+      });
+    }
+  };
+
+  const clearSelection = () => {
+    setSelectedItemIds(new Set());
+  };
+
+  const handleOpenActionMenu = (e: React.MouseEvent<HTMLButtonElement>, itemId: string) => {
+    e.stopPropagation();
+    if (openMenu?.itemId === itemId) {
+      setOpenMenu(null);
+      return;
+    }
+    const rect = e.currentTarget.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const openUp = spaceBelow < 160;
+    setOpenMenu({
+      itemId,
+      top: openUp ? rect.top - 4 : rect.bottom + 4,
+      right: Math.max(12, window.innerWidth - rect.right),
+      openUp,
+    });
+  };
 
   const openAddModal = () => {
     setEditingItem(null);
@@ -143,7 +353,6 @@ export const StockView: React.FC = () => {
     const now = new Date().toISOString();
 
     if (editingItem) {
-      // Edit existing item
       const itemRef = doc(db, 'restaurants', activeRestaurantId, 'items', editingItem.id);
       await updateDoc(itemRef, {
         name: name.trim(),
@@ -160,7 +369,6 @@ export const StockView: React.FC = () => {
         updatedAt: now,
       });
     } else {
-      // Create new item
       const itemRef = doc(collection(db, 'restaurants', activeRestaurantId, 'items'));
       const newItem: Item = {
         id: itemRef.id,
@@ -189,6 +397,157 @@ export const StockView: React.FC = () => {
     setIsItemModalOpen(false);
   };
 
+  // Individual Item Delete Handler
+  const handleConfirmSingleDelete = async () => {
+    if (!activeRestaurantId || !itemPendingDelete || !canManageInventory) return;
+    setIsDeletingSingle(true);
+    try {
+      const res = await deleteInventoryItemSafely({
+        restaurantId: activeRestaurantId,
+        item: itemPendingDelete,
+        actorUid: user?.uid || 'system',
+        actorName: userProfile?.name || user?.displayName || 'Authorized User',
+        actorRole: activeRole,
+      });
+
+      // Clear deleted/archived item from selection
+      if (res.outcome === 'DELETED' || res.outcome === 'ARCHIVED') {
+        setSelectedItemIds((prev) => {
+          const next = new Set(prev);
+          next.delete(res.itemId);
+          return next;
+        });
+      }
+
+      if (res.outcome === 'DELETED') {
+        setDeleteNotice({
+          variant: 'success',
+          title: `Deleted "${res.itemName}"`,
+          details: ['Item had zero stock and no historical transactions, so it was permanently removed.'],
+          deletedCount: 1,
+          archivedCount: 0,
+          failedCount: 0,
+        });
+      } else if (res.outcome === 'ARCHIVED') {
+        setDeleteNotice({
+          variant: 'warning',
+          title: `Archived "${res.itemName}" (Historical Records Preserved)`,
+          details: [
+            `Safely deactivated instead of permanently deleting because it is linked to: ${res.reasons.join(', ')}.`,
+            'All past transactions, purchase orders, and reports remain intact.',
+          ],
+          deletedCount: 0,
+          archivedCount: 1,
+          failedCount: 0,
+        });
+      } else {
+        setDeleteNotice({
+          variant: 'error',
+          title: `Could not delete "${res.itemName}"`,
+          details: [res.error || 'Deletion failed due to permissions or network error.'],
+          deletedCount: 0,
+          archivedCount: 0,
+          failedCount: 1,
+        });
+      }
+
+      setItemPendingDelete(null);
+    } catch (err: any) {
+      setDeleteNotice({
+        variant: 'error',
+        title: `Failed to delete "${itemPendingDelete.name}"`,
+        details: [err?.message || 'Unexpected error during deletion.'],
+        deletedCount: 0,
+        archivedCount: 0,
+        failedCount: 1,
+      });
+      setItemPendingDelete(null);
+    } finally {
+      setIsDeletingSingle(false);
+    }
+  };
+
+  // Bulk Item Delete Handler
+  const handleConfirmBulkDelete = async () => {
+    if (!activeRestaurantId || selectedItemsList.length === 0 || !canManageInventory) return;
+    setIsDeletingBulk(true);
+    try {
+      const bulkRes: BulkItemDeleteResult = await bulkDeleteInventoryItemsSafely({
+        restaurantId: activeRestaurantId,
+        itemsToDelete: selectedItemsList,
+        actorUid: user?.uid || 'system',
+        actorName: userProfile?.name || user?.displayName || 'Authorized User',
+        actorRole: activeRole,
+      });
+
+      const processedSuccessIds = new Set([
+        ...bulkRes.deleted.map((d) => d.itemId),
+        ...bulkRes.archived.map((a) => a.itemId),
+      ]);
+
+      setSelectedItemIds((prev) => {
+        const next = new Set(prev);
+        processedSuccessIds.forEach((id) => next.delete(id));
+        return next;
+      });
+
+      const details: string[] = [];
+      if (bulkRes.deleted.length > 0) {
+        details.push(
+          `Successfully deleted (${bulkRes.deleted.length}): ${bulkRes.deleted.map((d) => d.itemName).join(', ')}`
+        );
+      }
+      if (bulkRes.archived.length > 0) {
+        details.push(
+          `Archived to preserve history (${bulkRes.archived.length}): ${bulkRes.archived
+            .map((a) => `${a.itemName} (${a.reasons[0] || 'linked history'})`)
+            .join(', ')}`
+        );
+      }
+      if (bulkRes.failed.length > 0) {
+        details.push(
+          `Failed (${bulkRes.failed.length}): ${bulkRes.failed
+            .map((f) => `${f.itemName}: ${f.error || 'Error'}`)
+            .join('; ')}`
+        );
+      }
+
+      const hasSuccess = bulkRes.deleted.length > 0 || bulkRes.archived.length > 0;
+      const variant: DeleteFeedbackNotice['variant'] =
+        bulkRes.failed.length > 0 && !hasSuccess
+          ? 'error'
+          : bulkRes.failed.length > 0 || bulkRes.archived.length > 0
+          ? 'warning'
+          : 'success';
+
+      setDeleteNotice({
+        variant,
+        title:
+          bulkRes.failed.length > 0 && !hasSuccess
+            ? 'Bulk Delete Failed'
+            : 'Bulk Inventory Cleanup Complete',
+        details,
+        deletedCount: bulkRes.deleted.length,
+        archivedCount: bulkRes.archived.length,
+        failedCount: bulkRes.failed.length,
+      });
+
+      setIsBulkDeleteModalOpen(false);
+    } catch (err: any) {
+      setDeleteNotice({
+        variant: 'error',
+        title: 'Bulk Delete Failed',
+        details: [err?.message || 'Unexpected error during bulk deletion.'],
+        deletedCount: 0,
+        archivedCount: 0,
+        failedCount: selectedItemsList.length,
+      });
+      setIsBulkDeleteModalOpen(false);
+    } finally {
+      setIsDeletingBulk(false);
+    }
+  };
+
   // CSV Bulk Import
   const handleCsvImport = async () => {
     if (!activeRestaurantId || !csvText.trim()) return;
@@ -198,7 +557,6 @@ export const StockView: React.FC = () => {
       const batch = writeBatch(db);
       let count = 0;
 
-      // Skip header if contains 'name'
       const startIndex = lines[0].toLowerCase().includes('name') ? 1 : 0;
 
       for (let i = startIndex; i < lines.length; i++) {
@@ -243,40 +601,6 @@ export const StockView: React.FC = () => {
     }
   };
 
-  // Filtered List with Metrics
-  const processedItems = items.map((item) => {
-    const value = calculateStockValue(item.currentStock, item.averageStockRate || item.lastPurchaseRate || 0);
-    const { avgDailyQty, hasData } = calculateAverageDailyConsumption(issues, item.id, 14);
-    const stockDaysObj = calculateStockDays(item.currentStock, avgDailyQty);
-    const excessObj = calculateExcessStock(item, avgDailyQty);
-
-    let statusType: 'LOW' | 'EXCESS' | 'SUFFICIENT' = 'SUFFICIENT';
-    if (item.minimumStock > 0 && item.currentStock <= item.minimumStock) {
-      statusType = 'LOW';
-    } else if (excessObj.isExcess) {
-      statusType = 'EXCESS';
-    }
-
-    return {
-      ...item,
-      stockValue: value,
-      avgDailyQty,
-      hasConsumptionData: hasData,
-      stockDaysLabel: stockDaysObj.label,
-      excessValue: excessObj.excessValue,
-      statusType,
-    };
-  });
-
-  const filteredItems = processedItems.filter((item) => {
-    const matchSearch =
-      item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.category.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchDept = selectedDept === 'ALL' || item.departmentId === selectedDept;
-    const matchStatus = selectedStatus === 'ALL' || item.statusType === selectedStatus;
-    return matchSearch && matchDept && matchStatus;
-  });
-
   const handleExportCsv = () => {
     const headers = ['Item Name', 'Category', 'Unit', 'Current Stock', 'Avg Rate', 'Stock Value', 'Stock Days', 'Status'];
     const rows = filteredItems.map((i) => [
@@ -287,7 +611,7 @@ export const StockView: React.FC = () => {
       i.averageStockRate || i.lastPurchaseRate,
       i.stockValue,
       i.stockDaysLabel,
-      i.statusType,
+      i.status === 'inactive' ? 'ARCHIVED' : i.statusType,
     ]);
     exportToCsv(`stock_inventory_${activeRestaurant?.name || 'store'}`, headers, rows);
   };
@@ -306,16 +630,23 @@ export const StockView: React.FC = () => {
     exportToPdf('Current Stock Inventory Report', activeRestaurant?.name || 'Store', headers, rows);
   };
 
+  const openMenuItem = openMenu ? filteredItems.find((i) => i.id === openMenu.itemId) || null : null;
+
   return (
     <div className="space-y-6">
       {/* Header with actions */}
       <div className="bg-white rounded-xl border border-stone-200 p-6 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
         <div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <h1 className="text-xl font-bold text-stone-900 tracking-tight">Current Stock Inventory</h1>
             <Badge variant="neutral" size="sm">
-              {items.length} Total SKUs
+              {activeItemsCount} Active SKUs
             </Badge>
+            {archivedItemsCount > 0 && (
+              <Badge variant="neutral" size="sm">
+                {archivedItemsCount} Archived
+              </Badge>
+            )}
           </div>
           <p className="text-xs text-stone-500 mt-1">
             Real-time stock ledger calculated using Weighted Average Costing and daily consumption rates.
@@ -356,6 +687,61 @@ export const StockView: React.FC = () => {
         </div>
       </div>
 
+      {/* Delete / Archive Feedback Notification Banner */}
+      {deleteNotice && (
+        <div
+          id="inventory-delete-feedback-banner"
+          className={`rounded-xl border p-4 flex items-start justify-between gap-3 text-xs ${
+            deleteNotice.variant === 'success'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+              : deleteNotice.variant === 'warning'
+              ? 'bg-amber-50 border-amber-200 text-amber-950'
+              : 'bg-rose-50 border-rose-200 text-rose-900'
+          }`}
+        >
+          <div className="flex items-start gap-2.5">
+            {deleteNotice.variant === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+            ) : deleteNotice.variant === 'warning' ? (
+              <Archive className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+            )}
+            <div className="space-y-1">
+              <p className="font-bold">{deleteNotice.title}</p>
+              {(deleteNotice.deletedCount !== undefined ||
+                deleteNotice.archivedCount !== undefined ||
+                deleteNotice.failedCount !== undefined) && (
+                <div className="flex flex-wrap gap-2 pt-0.5 pb-0.5 text-[11px] font-semibold">
+                  <span className="px-2 py-0.5 rounded bg-white/80 border border-emerald-200 text-emerald-800">
+                    Successfully deleted: {deleteNotice.deletedCount ?? 0}
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-white/80 border border-amber-200 text-amber-800">
+                    Archived: {deleteNotice.archivedCount ?? 0}
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-white/80 border border-rose-200 text-rose-800">
+                    Failed: {deleteNotice.failedCount ?? 0}
+                  </span>
+                </div>
+              )}
+              {deleteNotice.details.map((line, idx) => (
+                <p key={idx} className="opacity-90 leading-relaxed">
+                  {line}
+                </p>
+              ))}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setDeleteNotice(null)}
+            className="p-1 rounded hover:bg-black/5 shrink-0"
+            aria-label="Dismiss notification"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* Filter Toolbar */}
       <div className="bg-white rounded-xl border border-stone-200 p-4 flex flex-col md:flex-row items-center gap-3">
         <div className="relative flex-1 w-full">
@@ -370,7 +756,7 @@ export const StockView: React.FC = () => {
           />
         </div>
 
-        <div className="flex items-center gap-2 w-full md:w-auto">
+        <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
           <select
             id="dept-filter-select"
             value={selectedDept}
@@ -396,15 +782,78 @@ export const StockView: React.FC = () => {
             <option value="EXCESS">Excess Stock</option>
             <option value="SUFFICIENT">Sufficient</option>
           </select>
+
+          {archivedItemsCount > 0 && (
+            <label className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs border border-stone-200 rounded-lg bg-stone-50 text-stone-700 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={showArchived}
+                onChange={(e) => setShowArchived(e.target.checked)}
+                className="rounded border-stone-300 text-amber-600 focus:ring-amber-500"
+              />
+              <span>Show Archived ({archivedItemsCount})</span>
+            </label>
+          )}
         </div>
       </div>
 
-      {/* Items Table */}
-      <div className="bg-white rounded-xl border border-stone-200 overflow-hidden shadow-2xs">
+      {/* Bulk Action Toolbar (Shown when 1+ items selected by authorized Owner/Manager) */}
+      {canManageInventory && selectedItemsList.length > 0 && (
+        <div
+          id="bulk-action-toolbar"
+          className="bg-stone-900 text-white rounded-xl border border-stone-800 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-md"
+        >
+          <div className="flex items-center gap-2.5">
+            <span className="inline-flex items-center justify-center px-2.5 py-0.5 rounded-full bg-[#FF5A1F] text-white font-bold text-xs">
+              {selectedItemsList.length}
+            </span>
+            <span className="text-xs sm:text-sm font-semibold">
+              {selectedItemsList.length} {selectedItemsList.length === 1 ? 'Item' : 'Items'} Selected
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              id="bulk-cancel-selection-btn"
+              type="button"
+              onClick={clearSelection}
+              className="px-3 py-1.5 rounded-lg border border-stone-700 hover:bg-stone-800 text-stone-200 text-xs font-semibold transition-colors"
+            >
+              Cancel Selection
+            </button>
+            <button
+              id="bulk-delete-selected-btn"
+              type="button"
+              onClick={() => setIsBulkDeleteModalOpen(true)}
+              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold transition-colors shadow-xs"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>Delete Selected</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Items List — Desktop / Tablet Table */}
+      <div className="hidden md:block bg-white rounded-xl border border-stone-200 overflow-hidden shadow-2xs">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs text-stone-600">
             <thead className="bg-stone-50 border-b border-stone-200 text-[11px] font-bold text-stone-700 uppercase tracking-wider">
               <tr>
+                {canManageInventory && (
+                  <th className="py-3 pl-4 pr-2 w-10">
+                    <input
+                      ref={selectAllDesktopRef}
+                      id="select-all-items-checkbox"
+                      type="checkbox"
+                      aria-label="Select all visible inventory items"
+                      checked={allVisibleSelected}
+                      disabled={selectableVisibleItems.length === 0}
+                      onChange={toggleSelectAllVisible}
+                      className="w-4 h-4 rounded border-stone-300 text-amber-600 focus:ring-amber-500 cursor-pointer disabled:opacity-40"
+                    />
+                  </th>
+                )}
                 <th className="py-3 px-4">Item Name</th>
                 <th className="py-3 px-4">Category</th>
                 <th className="py-3 px-4">Department</th>
@@ -413,76 +862,532 @@ export const StockView: React.FC = () => {
                 <th className="py-3 px-4 text-right">Stock Value</th>
                 <th className="py-3 px-4">Stock Days</th>
                 <th className="py-3 px-4">Status</th>
-                {hasRole(['OWNER', 'MANAGER']) && <th className="py-3 px-4 text-center">Action</th>}
+                <th className="py-3 px-4 text-center">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-stone-100">
               {loading ? (
                 <tr>
-                  <td colSpan={9} className="py-10 text-center text-stone-400">
+                  <td colSpan={canManageInventory ? 10 : 9} className="py-10 text-center text-stone-400">
                     Loading stock ledger...
                   </td>
                 </tr>
               ) : filteredItems.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="py-12 text-center text-stone-400">
+                  <td colSpan={canManageInventory ? 10 : 9} className="py-12 text-center text-stone-400">
                     No items matching the selected filters.
                   </td>
                 </tr>
               ) : (
-                filteredItems.map((item) => (
-                  <tr key={item.id} className="hover:bg-stone-50/60 transition-colors">
-                    <td className="py-3 px-4 font-semibold text-stone-900">{item.name}</td>
-                    <td className="py-3 px-4">
-                      <span className="px-2 py-0.5 rounded bg-stone-100 text-stone-700 text-[10px] font-medium">
-                        {item.category}
-                      </span>
-                    </td>
-                    <td className="py-3 px-4 text-stone-500">{item.departmentName || 'General Store'}</td>
-                    <td className="py-3 px-4 text-right font-bold text-stone-900">
-                      {item.currentStock} <span className="text-[11px] font-normal text-stone-500">{item.unit}</span>
-                    </td>
-                    <td className="py-3 px-4 text-right font-medium text-stone-700">
-                      {currencySymbol}{(item.averageStockRate || item.lastPurchaseRate || 0).toFixed(2)}
-                    </td>
-                    <td className="py-3 px-4 text-right font-bold text-stone-900">
-                      {currencySymbol}{item.stockValue.toFixed(2)}
-                    </td>
-                    <td className="py-3 px-4 text-stone-500 font-mono text-[11px]">
-                      {item.stockDaysLabel}
-                    </td>
-                    <td className="py-3 px-4">
-                      {item.statusType === 'LOW' ? (
-                        <Badge variant="danger" size="sm">
-                          Low Stock
-                        </Badge>
-                      ) : item.statusType === 'EXCESS' ? (
-                        <Badge variant="warning" size="sm">
-                          Excess Stock
-                        </Badge>
-                      ) : (
-                        <Badge variant="success" size="sm">
-                          Sufficient
-                        </Badge>
+                filteredItems.map((item) => {
+                  const isArchived = item.status === 'inactive';
+                  const isSelected = selectedItemIds.has(item.id);
+                  return (
+                    <tr
+                      key={item.id}
+                      className={`hover:bg-stone-50/60 transition-colors ${
+                        isSelected ? 'bg-amber-50/40' : ''
+                      } ${isArchived ? 'opacity-65 bg-stone-50/50' : ''}`}
+                    >
+                      {canManageInventory && (
+                        <td className="py-3 pl-4 pr-2">
+                          <input
+                            id={`select-item-${item.id}`}
+                            type="checkbox"
+                            aria-label={`Select ${item.name}`}
+                            checked={isSelected}
+                            disabled={isArchived}
+                            onChange={() => toggleSelectOne(item.id)}
+                            className="w-4 h-4 rounded border-stone-300 text-amber-600 focus:ring-amber-500 cursor-pointer disabled:opacity-30"
+                          />
+                        </td>
                       )}
-                    </td>
-                    {hasRole(['OWNER', 'MANAGER']) && (
+                      <td className="py-3 px-4 font-semibold text-stone-900">
+                        <div className="flex items-center gap-2">
+                          <span>{item.name}</span>
+                          {isArchived && (
+                            <span className="px-1.5 py-0.5 rounded bg-stone-200 text-stone-700 text-[10px] font-semibold">
+                              Archived
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="py-3 px-4">
+                        <span className="px-2 py-0.5 rounded bg-stone-100 text-stone-700 text-[10px] font-medium">
+                          {item.category}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 text-stone-500">{item.departmentName || 'General Store'}</td>
+                      <td className="py-3 px-4 text-right font-bold text-stone-900">
+                        {item.currentStock}{' '}
+                        <span className="text-[11px] font-normal text-stone-500">{item.unit}</span>
+                      </td>
+                      <td className="py-3 px-4 text-right font-medium text-stone-700">
+                        {currencySymbol}
+                        {(item.averageStockRate || item.lastPurchaseRate || 0).toFixed(2)}
+                      </td>
+                      <td className="py-3 px-4 text-right font-bold text-stone-900">
+                        {currencySymbol}
+                        {item.stockValue.toFixed(2)}
+                      </td>
+                      <td className="py-3 px-4 text-stone-500 font-mono text-[11px]">
+                        {item.stockDaysLabel}
+                      </td>
+                      <td className="py-3 px-4">
+                        {isArchived ? (
+                          <Badge variant="neutral" size="sm">
+                            Archived
+                          </Badge>
+                        ) : item.statusType === 'LOW' ? (
+                          <Badge variant="danger" size="sm">
+                            Low Stock
+                          </Badge>
+                        ) : item.statusType === 'EXCESS' ? (
+                          <Badge variant="warning" size="sm">
+                            Excess Stock
+                          </Badge>
+                        ) : (
+                          <Badge variant="success" size="sm">
+                            Sufficient
+                          </Badge>
+                        )}
+                      </td>
                       <td className="py-3 px-4 text-center">
                         <button
-                          onClick={() => openEditModal(item)}
-                          className="p-1 text-stone-400 hover:text-stone-700 rounded"
+                          id={`item-action-menu-btn-${item.id}`}
+                          type="button"
+                          aria-label={`Actions for ${item.name}`}
+                          onClick={(e) => handleOpenActionMenu(e, item.id)}
+                          className="p-1.5 text-stone-500 hover:text-stone-900 hover:bg-stone-100 rounded-lg transition-colors"
                         >
-                          <Edit2 className="w-3.5 h-3.5" />
+                          <MoreVertical className="w-4 h-4" />
                         </button>
                       </td>
-                    )}
-                  </tr>
-                ))
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>
         </div>
       </div>
+
+      {/* Items List — Mobile Responsive Cards */}
+      <div className="md:hidden space-y-3">
+        {canManageInventory && selectableVisibleItems.length > 0 && (
+          <div className="bg-white rounded-xl border border-stone-200 px-4 py-2.5 flex items-center justify-between">
+            <label className="flex items-center gap-2.5 text-xs font-bold text-stone-800 cursor-pointer">
+              <input
+                ref={selectAllMobileRef}
+                id="mobile-select-all-items-checkbox"
+                type="checkbox"
+                checked={allVisibleSelected}
+                onChange={toggleSelectAllVisible}
+                className="w-4 h-4 rounded border-stone-300 text-amber-600 focus:ring-amber-500"
+              />
+              <span>Select All ({selectableVisibleItems.length})</span>
+            </label>
+            {selectedItemsList.length > 0 && (
+              <button
+                type="button"
+                onClick={clearSelection}
+                className="text-[11px] font-semibold text-stone-500 hover:text-stone-800"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        )}
+
+        {loading ? (
+          <div className="bg-white rounded-xl border border-stone-200 p-8 text-center text-xs text-stone-400">
+            Loading stock ledger...
+          </div>
+        ) : filteredItems.length === 0 ? (
+          <div className="bg-white rounded-xl border border-stone-200 p-8 text-center text-xs text-stone-400">
+            No items matching the selected filters.
+          </div>
+        ) : (
+          filteredItems.map((item) => {
+            const isArchived = item.status === 'inactive';
+            const isSelected = selectedItemIds.has(item.id);
+            return (
+              <div
+                key={item.id}
+                className={`bg-white rounded-xl border p-4 space-y-3 shadow-2xs transition-colors ${
+                  isSelected ? 'border-amber-400 bg-amber-50/30' : 'border-stone-200'
+                } ${isArchived ? 'opacity-70' : ''}`}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-start gap-2.5 min-w-0">
+                    {canManageInventory && (
+                      <input
+                        id={`mobile-select-item-${item.id}`}
+                        type="checkbox"
+                        aria-label={`Select ${item.name}`}
+                        checked={isSelected}
+                        disabled={isArchived}
+                        onChange={() => toggleSelectOne(item.id)}
+                        className="mt-0.5 w-4 h-4 rounded border-stone-300 text-amber-600 focus:ring-amber-500 shrink-0"
+                      />
+                    )}
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <h3 className="text-sm font-bold text-stone-900 truncate">{item.name}</h3>
+                        {isArchived && (
+                          <span className="px-1.5 py-0.5 rounded bg-stone-200 text-stone-700 text-[10px] font-semibold">
+                            Archived
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 mt-1 flex-wrap">
+                        <span className="px-2 py-0.5 rounded bg-stone-100 text-stone-700 text-[10px] font-medium">
+                          {item.category}
+                        </span>
+                        <span className="text-[11px] text-stone-500">
+                          {item.departmentName || 'General Store'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    id={`mobile-item-action-menu-btn-${item.id}`}
+                    type="button"
+                    aria-label={`Actions for ${item.name}`}
+                    onClick={(e) => handleOpenActionMenu(e, item.id)}
+                    className="p-1.5 text-stone-500 hover:text-stone-900 hover:bg-stone-100 rounded-lg shrink-0"
+                  >
+                    <MoreVertical className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2 pt-2 border-t border-stone-100 text-xs">
+                  <div>
+                    <span className="text-[10px] text-stone-400 uppercase block">Stock</span>
+                    <span className="font-bold text-stone-900">
+                      {item.currentStock} {item.unit}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-stone-400 uppercase block">Avg Rate</span>
+                    <span className="font-semibold text-stone-700">
+                      {currencySymbol}
+                      {(item.averageStockRate || item.lastPurchaseRate || 0).toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-[10px] text-stone-400 uppercase block">Value</span>
+                    <span className="font-bold text-stone-900">
+                      {currencySymbol}
+                      {item.stockValue.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between pt-1">
+                  <span className="text-[11px] font-mono text-stone-500">
+                    Days: {item.stockDaysLabel}
+                  </span>
+                  {isArchived ? (
+                    <Badge variant="neutral" size="sm">
+                      Archived
+                    </Badge>
+                  ) : item.statusType === 'LOW' ? (
+                    <Badge variant="danger" size="sm">
+                      Low Stock
+                    </Badge>
+                  ) : item.statusType === 'EXCESS' ? (
+                    <Badge variant="warning" size="sm">
+                      Excess Stock
+                    </Badge>
+                  ) : (
+                    <Badge variant="success" size="sm">
+                      Sufficient
+                    </Badge>
+                  )}
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      {/* Fixed Floating Row Action Menu (View Item / Edit Item / Delete Item) */}
+      {openMenu && openMenuItem && (
+        <div
+          id="item-row-action-menu"
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            position: 'fixed',
+            top: openMenu.openUp ? 'auto' : `${openMenu.top}px`,
+            bottom: openMenu.openUp ? `${window.innerHeight - openMenu.top}px` : 'auto',
+            right: `${openMenu.right}px`,
+          }}
+          className="z-50 w-44 bg-white rounded-xl shadow-xl border border-stone-200 py-1.5 text-xs animate-in fade-in zoom-in-95 duration-100"
+        >
+          <button
+            id={`action-view-item-${openMenuItem.id}`}
+            type="button"
+            onClick={() => {
+              setViewingItem(openMenuItem);
+              setOpenMenu(null);
+            }}
+            className="w-full text-left px-3 py-2 text-stone-700 hover:bg-stone-50 flex items-center gap-2 font-medium"
+          >
+            <Eye className="w-3.5 h-3.5 text-stone-500" />
+            <span>View Item</span>
+          </button>
+
+          {canManageInventory && (
+            <>
+              <button
+                id={`action-edit-item-${openMenuItem.id}`}
+                type="button"
+                onClick={() => {
+                  openEditModal(openMenuItem);
+                  setOpenMenu(null);
+                }}
+                className="w-full text-left px-3 py-2 text-stone-700 hover:bg-stone-50 flex items-center gap-2 font-medium"
+              >
+                <Edit2 className="w-3.5 h-3.5 text-stone-500" />
+                <span>Edit Item</span>
+              </button>
+
+              {openMenuItem.status !== 'inactive' && (
+                <>
+                  <div className="my-1 border-t border-stone-100" />
+                  <button
+                    id={`action-delete-item-${openMenuItem.id}`}
+                    type="button"
+                    onClick={() => {
+                      setItemPendingDelete(openMenuItem);
+                      setOpenMenu(null);
+                    }}
+                    className="w-full text-left px-3 py-2 text-rose-600 hover:bg-rose-50 flex items-center gap-2 font-semibold"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                    <span>Delete Item</span>
+                  </button>
+                </>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* View Item Details Modal */}
+      <Modal
+        isOpen={Boolean(viewingItem)}
+        onClose={() => setViewingItem(null)}
+        title={viewingItem?.name || 'Item Details'}
+        subtitle="Inventory Master Specification"
+        maxWidth="md"
+      >
+        {viewingItem && (
+          <div className="space-y-4 text-xs">
+            <div className="grid grid-cols-2 gap-3 p-3.5 rounded-xl bg-stone-50 border border-stone-200">
+              <div>
+                <span className="text-[10px] uppercase font-semibold text-stone-400 block">Item Name</span>
+                <p className="font-bold text-stone-900 mt-0.5">{viewingItem.name}</p>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-semibold text-stone-400 block">Category</span>
+                <p className="font-semibold text-stone-800 mt-0.5">{viewingItem.category}</p>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-semibold text-stone-400 block">Department</span>
+                <p className="text-stone-700 mt-0.5">{viewingItem.departmentName || 'General Store'}</p>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-semibold text-stone-400 block">Primary Vendor</span>
+                <p className="text-stone-700 mt-0.5">{viewingItem.primaryVendorName || 'Not assigned'}</p>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-semibold text-stone-400 block">Current Stock</span>
+                <p className="font-bold text-stone-900 mt-0.5">
+                  {viewingItem.currentStock} {viewingItem.unit}
+                </p>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-semibold text-stone-400 block">Avg Rate (WAC)</span>
+                <p className="font-semibold text-stone-800 mt-0.5">
+                  {currencySymbol}
+                  {(viewingItem.averageStockRate || viewingItem.lastPurchaseRate || 0).toFixed(2)} / {viewingItem.unit}
+                </p>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-semibold text-stone-400 block">Stock Value</span>
+                <p className="font-bold text-stone-900 mt-0.5">
+                  {currencySymbol}
+                  {viewingItem.stockValue.toFixed(2)}
+                </p>
+              </div>
+              <div>
+                <span className="text-[10px] uppercase font-semibold text-stone-400 block">Min / Max / Target Days</span>
+                <p className="text-stone-700 mt-0.5">
+                  {viewingItem.minimumStock} / {viewingItem.maximumStock} {viewingItem.unit} • {viewingItem.targetStockDays}d
+                </p>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2">
+              {canManageInventory && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = viewingItem;
+                    setViewingItem(null);
+                    openEditModal(target);
+                  }}
+                  className="px-4 py-2 border border-stone-200 hover:bg-stone-50 text-stone-700 rounded-lg font-semibold"
+                >
+                  Edit Item
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setViewingItem(null)}
+                className="px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white rounded-lg font-semibold"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Individual Delete Confirmation Modal */}
+      <Modal
+        isOpen={Boolean(itemPendingDelete)}
+        onClose={() => !isDeletingSingle && setItemPendingDelete(null)}
+        title="Delete Inventory Item"
+        subtitle="Are you sure you want to delete this inventory item?"
+        maxWidth="md"
+      >
+        {itemPendingDelete && (
+          <div className="space-y-4 text-xs">
+            <p className="text-stone-700 font-medium">
+              Are you sure you want to delete this inventory item?
+            </p>
+
+            <div className="p-4 rounded-xl bg-stone-50 border border-stone-200 space-y-2">
+              <div className="flex justify-between">
+                <span className="text-stone-500">Item Name:</span>
+                <span className="font-bold text-stone-900">{itemPendingDelete.name}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-stone-500">Category:</span>
+                <span className="font-semibold text-stone-800">{itemPendingDelete.category}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-stone-500">Current Stock:</span>
+                <span className="font-bold text-stone-900">{itemPendingDelete.currentStock}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-stone-500">Unit:</span>
+                <span className="font-semibold text-stone-800">{itemPendingDelete.unit}</span>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-[11px] leading-relaxed">
+              Safety guarantee: If this item has active stock or historical transactions (Purchase Orders, Invoices, Issues, Audits, Wastage, or Recipes), it will be safely archived instead of permanently deleted so all reports remain intact.
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-stone-100">
+              <button
+                id="cancel-single-delete-btn"
+                type="button"
+                disabled={isDeletingSingle}
+                onClick={() => setItemPendingDelete(null)}
+                className="px-4 py-2 rounded-lg border border-stone-200 hover:bg-stone-50 text-stone-700 font-semibold disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                id="confirm-single-delete-btn"
+                type="button"
+                disabled={isDeletingSingle}
+                onClick={handleConfirmSingleDelete}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold shadow-xs disabled:opacity-50"
+              >
+                {isDeletingSingle ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Trash2 className="w-3.5 h-3.5" />
+                )}
+                <span>Delete Item</span>
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Bulk Delete Confirmation Modal */}
+      <Modal
+        isOpen={isBulkDeleteModalOpen}
+        onClose={() => !isDeletingBulk && setIsBulkDeleteModalOpen(false)}
+        title="Confirm Bulk Delete"
+        subtitle={`${selectedItemsList.length} ${selectedItemsList.length === 1 ? 'item' : 'items'} selected for removal`}
+        maxWidth="md"
+      >
+        <div className="space-y-4 text-xs">
+          <p className="text-sm font-semibold text-stone-900">
+            You are about to delete {selectedItemsList.length} inventory{' '}
+            {selectedItemsList.length === 1 ? 'item' : 'items'}. Are you sure?
+          </p>
+
+          <div className="rounded-xl border border-stone-200 bg-stone-50 overflow-hidden">
+            <div className="px-3.5 py-2 bg-stone-100 border-b border-stone-200 flex items-center justify-between text-[11px] font-bold text-stone-700 uppercase">
+              <span>Selected Items ({selectedItemsList.length})</span>
+              <span>Current Stock</span>
+            </div>
+            <div className="max-h-52 overflow-y-auto divide-y divide-stone-200/70">
+              {selectedItemsList.map((item) => (
+                <div key={item.id} className="px-3.5 py-2 flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="font-semibold text-stone-900 truncate">{item.name}</p>
+                    <p className="text-[10px] text-stone-500">{item.category}</p>
+                  </div>
+                  <span className="font-mono font-semibold text-stone-800 shrink-0">
+                    {item.currentStock} {item.unit}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-[11px] leading-relaxed">
+            Items with zero stock and zero transaction references will be permanently deleted. Items with stock or historical records will be safely archived to protect reports and ledgers.
+          </div>
+
+          <div className="flex justify-end gap-2 pt-2 border-t border-stone-100">
+            <button
+              id="cancel-bulk-delete-btn"
+              type="button"
+              disabled={isDeletingBulk}
+              onClick={() => setIsBulkDeleteModalOpen(false)}
+              className="px-4 py-2 rounded-lg border border-stone-200 hover:bg-stone-50 text-stone-700 font-semibold disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              id="confirm-bulk-delete-btn"
+              type="button"
+              disabled={isDeletingBulk}
+              onClick={handleConfirmBulkDelete}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold shadow-xs disabled:opacity-50"
+            >
+              {isDeletingBulk ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Trash2 className="w-3.5 h-3.5" />
+              )}
+              <span>Confirm Delete</span>
+            </button>
+          </div>
+        </div>
+      </Modal>
 
       {/* Add/Edit Modal */}
       <Modal
