@@ -1,29 +1,75 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { ShieldCheck, Phone, CheckCircle2, ArrowRight, AlertCircle, Loader2 } from 'lucide-react';
 import { ConfirmationResult } from 'firebase/auth';
 import { useAuth } from '../context/AuthContext';
 import { StoqoLogo } from '../components/brand/StoqoLogo';
+import {
+  SUPPORTED_COUNTRIES,
+  CountryDialOption,
+  normalizeAndValidatePhoneNumber,
+} from '../utils/phoneNormalization';
+
+function formatFirebasePhoneError(err: any): string {
+  const code = err?.code || '';
+  const rawMessage = err?.message || '';
+
+  if (code === 'auth/invalid-phone-number' || rawMessage.includes('auth/invalid-phone-number')) {
+    return 'Firebase rejected the phone number format (auth/invalid-phone-number). Please verify your country code and mobile digits.';
+  }
+  if (code === 'auth/too-many-requests' || rawMessage.includes('auth/too-many-requests')) {
+    return 'Too many OTP attempts. Please wait a few minutes and try again.';
+  }
+  if (code === 'auth/captcha-check-failed' || rawMessage.includes('auth/captcha-check-failed')) {
+    return 'reCAPTCHA verification failed. Please refresh the page and try again.';
+  }
+  if (code === 'auth/operation-not-allowed' || rawMessage.includes('auth/operation-not-allowed')) {
+    return 'Phone Authentication is not enabled in Firebase Console for this project.';
+  }
+  if (code === 'auth/quota-exceeded' || rawMessage.includes('auth/quota-exceeded')) {
+    return 'SMS quota exceeded for this Firebase project. Please try again later.';
+  }
+  if (code === 'auth/invalid-verification-code' || rawMessage.includes('auth/invalid-verification-code')) {
+    return 'Invalid 6-digit verification code. Please check the SMS and try again.';
+  }
+  if (code === 'auth/code-expired' || rawMessage.includes('auth/code-expired')) {
+    return 'Verification code has expired. Please request a new OTP.';
+  }
+  return rawMessage || 'Failed to send verification code. Please check your phone number.';
+}
 
 export const AuthView: React.FC = () => {
-  const { loginWithGoogle, setUpPhoneRecaptcha, sendPhoneOtp, error: authError } = useAuth();
+  const { loginWithGoogle, setUpPhoneRecaptcha, sendPhoneOtp, error: authError, clearError } = useAuth();
 
   const [authMode, setAuthMode] = useState<'google' | 'phone'>('google');
+  const [countryCode, setCountryCode] = useState<CountryDialOption['code']>('IN');
   const [phoneNumber, setPhoneNumber] = useState('');
+  const [sentE164Number, setSentE164Number] = useState('');
   const [otpCode, setOtpCode] = useState('');
   const [isOtpSent, setIsOtpSent] = useState(false);
   const [confirmationResult, setConfirmationResult] = useState<ConfirmationResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
 
+  const selectedCountry = useMemo(
+    () => SUPPORTED_COUNTRIES.find((c) => c.code === countryCode) || SUPPORTED_COUNTRIES[0],
+    [countryCode]
+  );
+
+  const normalizedPreview = useMemo(
+    () => normalizeAndValidatePhoneNumber(phoneNumber, countryCode),
+    [phoneNumber, countryCode]
+  );
+
   useEffect(() => {
-    // Clear recaptcha container if switching modes
     setLocalError(null);
+    clearError();
   }, [authMode]);
 
   const handleGoogleSignIn = async () => {
     try {
       setLoading(true);
       setLocalError(null);
+      clearError();
       await loginWithGoogle();
     } catch (err: any) {
       setLocalError(err?.message || 'Google sign-in failed');
@@ -34,8 +80,11 @@ export const AuthView: React.FC = () => {
 
   const handleSendPhoneOtp = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!phoneNumber || phoneNumber.length < 10) {
-      setLocalError('Please enter a valid phone number with country code (e.g. +919876543210)');
+    clearError();
+
+    const validation = normalizeAndValidatePhoneNumber(phoneNumber, countryCode);
+    if (!validation.isValid) {
+      setLocalError(validation.error || 'Please enter a valid mobile number.');
       return;
     }
 
@@ -43,11 +92,14 @@ export const AuthView: React.FC = () => {
       setLoading(true);
       setLocalError(null);
       const recaptcha = setUpPhoneRecaptcha('recaptcha-container');
-      const confirmation = await sendPhoneOtp(phoneNumber, recaptcha);
+      const confirmation = await sendPhoneOtp(validation.e164, recaptcha);
+      setSentE164Number(validation.e164);
       setConfirmationResult(confirmation);
       setIsOtpSent(true);
     } catch (err: any) {
-      setLocalError(err?.message || 'Failed to send OTP. Ensure phone number starts with + and country code.');
+      setIsOtpSent(false);
+      setConfirmationResult(null);
+      setLocalError(formatFirebasePhoneError(err));
     } finally {
       setLoading(false);
     }
@@ -55,7 +107,9 @@ export const AuthView: React.FC = () => {
 
   const handleVerifyOtp = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!otpCode || otpCode.length < 6 || !confirmationResult) {
+    clearError();
+    const cleanedOtp = otpCode.replace(/\D/g, '');
+    if (!cleanedOtp || cleanedOtp.length !== 6 || !confirmationResult) {
       setLocalError('Please enter the 6-digit verification code.');
       return;
     }
@@ -63,9 +117,9 @@ export const AuthView: React.FC = () => {
     try {
       setLoading(true);
       setLocalError(null);
-      await confirmationResult.confirm(otpCode);
+      await confirmationResult.confirm(cleanedOtp);
     } catch (err: any) {
-      setLocalError(err?.message || 'Invalid or expired OTP code.');
+      setLocalError(formatFirebasePhoneError(err));
     } finally {
       setLoading(false);
     }
@@ -164,24 +218,60 @@ export const AuthView: React.FC = () => {
           ) : !isOtpSent ? (
             <form onSubmit={handleSendPhoneOtp} className="space-y-4">
               <div>
-                <label className="block text-xs font-semibold text-stone-700 uppercase tracking-wider mb-1">
-                  Mobile Number (with Country Code)
+                <label
+                  htmlFor="phone-input"
+                  className="block text-xs font-semibold text-stone-700 uppercase tracking-wider mb-1"
+                >
+                  Mobile Number
                 </label>
-                <div className="relative rounded-xl border border-stone-300 shadow-2xs focus-within:border-amber-500 focus-within:ring-1 focus-within:ring-amber-500">
-                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-stone-400">
-                    <Phone className="w-4 h-4" />
+                <div className="flex rounded-xl border border-stone-300 shadow-2xs focus-within:border-amber-500 focus-within:ring-1 focus-within:ring-amber-500 overflow-hidden bg-white">
+                  <select
+                    id="country-code-select"
+                    aria-label="Country code"
+                    value={countryCode}
+                    onChange={(e) => {
+                      setCountryCode(e.target.value as CountryDialOption['code']);
+                      setLocalError(null);
+                      clearError();
+                    }}
+                    className="bg-stone-50 border-r border-stone-200 px-2.5 py-2 text-xs font-semibold text-stone-800 focus:outline-none cursor-pointer"
+                  >
+                    {SUPPORTED_COUNTRIES.map((c) => (
+                      <option key={c.code} value={c.code}>
+                        {c.name} ({c.dialCode})
+                      </option>
+                    ))}
+                  </select>
+                  <div className="relative flex-1 flex items-center">
+                    <div className="pl-2.5 flex items-center pointer-events-none text-stone-400">
+                      <Phone className="w-3.5 h-3.5" />
+                    </div>
+                    <input
+                      id="phone-input"
+                      type="tel"
+                      inputMode="tel"
+                      autoComplete="tel"
+                      required
+                      placeholder={selectedCountry.placeholder}
+                      value={phoneNumber}
+                      onChange={(e) => {
+                        setPhoneNumber(e.target.value);
+                        if (localError) setLocalError(null);
+                        if (authError) clearError();
+                      }}
+                      className="block w-full pl-2 pr-3 py-2 text-sm text-stone-900 focus:outline-none placeholder-stone-400"
+                    />
                   </div>
-                  <input
-                    id="phone-input"
-                    type="tel"
-                    required
-                    placeholder="+91 98765 43210"
-                    value={phoneNumber}
-                    onChange={(e) => setPhoneNumber(e.target.value)}
-                    className="block w-full pl-9 pr-3 py-2 text-sm text-stone-900 rounded-xl focus:outline-none placeholder-stone-400"
-                  />
                 </div>
-                <p className="mt-1 text-[11px] text-stone-500">Include country code: +91 (India), +971 (UAE), +1 (US), +44 (UK)</p>
+                {normalizedPreview.isValid ? (
+                  <p className="mt-1.5 text-[11px] text-emerald-700 font-medium">
+                    Normalized Firebase format: <span className="font-mono font-bold">{normalizedPreview.e164}</span>
+                  </p>
+                ) : (
+                  <p className="mt-1.5 text-[11px] text-stone-500">
+                    Enter your {selectedCountry.expectedDigits}-digit {selectedCountry.name} mobile number — {selectedCountry.dialCode} is added automatically.
+                  </p>
+                )}
               </div>
 
               <button
@@ -198,25 +288,42 @@ export const AuthView: React.FC = () => {
             <form onSubmit={handleVerifyOtp} className="space-y-4">
               <div>
                 <div className="flex items-center justify-between mb-1">
-                  <label className="block text-xs font-semibold text-stone-700 uppercase tracking-wider">
+                  <label
+                    htmlFor="otp-input"
+                    className="block text-xs font-semibold text-stone-700 uppercase tracking-wider"
+                  >
                     Enter 6-Digit SMS Code
                   </label>
                   <button
                     type="button"
-                    onClick={() => setIsOtpSent(false)}
+                    onClick={() => {
+                      setIsOtpSent(false);
+                      setOtpCode('');
+                      setLocalError(null);
+                      clearError();
+                    }}
                     className="text-[11px] text-amber-600 hover:underline"
                   >
                     Change Number
                   </button>
                 </div>
+                {sentE164Number && (
+                  <p className="text-[11px] text-stone-500 mb-2">
+                    OTP sent to <span className="font-mono font-semibold text-stone-800">{sentE164Number}</span>
+                  </p>
+                )}
                 <input
                   id="otp-input"
                   type="text"
+                  inputMode="numeric"
                   maxLength={6}
                   required
                   placeholder="123456"
                   value={otpCode}
-                  onChange={(e) => setOtpCode(e.target.value)}
+                  onChange={(e) => {
+                    setOtpCode(e.target.value);
+                    if (localError) setLocalError(null);
+                  }}
                   className="block w-full text-center tracking-widest text-lg font-bold px-3 py-2 border border-stone-300 rounded-xl focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
                 />
               </div>

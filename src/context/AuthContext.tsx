@@ -39,6 +39,7 @@ interface AuthContextType {
   loadingStage: LoadingStage;
   loadingProgress: number;
   error: string | null;
+  clearError: () => void;
   isFirebaseOffline: boolean;
   retryInitialization: () => Promise<void>;
   loginWithGoogle: () => Promise<void>;
@@ -357,13 +358,32 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const clearError = () => setError(null);
+
   const setUpPhoneRecaptcha = (containerId: string): RecaptchaVerifier => {
-    return new RecaptchaVerifier(auth, containerId, {
+    const win = window as unknown as { stoqoRecaptchaVerifier?: RecaptchaVerifier };
+    if (win.stoqoRecaptchaVerifier) {
+      try {
+        win.stoqoRecaptchaVerifier.clear();
+      } catch {
+        // Ignore if already cleared
+      }
+      win.stoqoRecaptchaVerifier = undefined;
+    }
+
+    const containerEl = document.getElementById(containerId);
+    if (containerEl) {
+      containerEl.innerHTML = '';
+    }
+
+    const verifier = new RecaptchaVerifier(auth, containerId, {
       size: 'invisible',
       callback: () => {
         // reCAPTCHA solved
       },
     });
+    win.stoqoRecaptchaVerifier = verifier;
+    return verifier;
   };
 
   const sendPhoneOtp = async (
@@ -420,6 +440,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         loadingStage,
         loadingProgress,
         error,
+        clearError,
         isFirebaseOffline,
         retryInitialization,
         loginWithGoogle,
