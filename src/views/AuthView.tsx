@@ -3,6 +3,7 @@ import { ShieldCheck, Phone, CheckCircle2, ArrowRight, AlertCircle, Loader2 } fr
 import { ConfirmationResult } from 'firebase/auth';
 import { useAuth } from '../context/AuthContext';
 import { StoqoLogo } from '../components/brand/StoqoLogo';
+import { LegalFooter } from '../components/layout/LegalFooter';
 import {
   SUPPORTED_COUNTRIES,
   CountryDialOption,
@@ -126,11 +127,12 @@ export const AuthView: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-stone-100 flex flex-col justify-center py-12 px-4 sm:px-6 lg:px-8">
+    <div className="min-h-screen bg-stone-100 flex flex-col justify-between">
       {/* reCAPTCHA anchor */}
       <div id="recaptcha-container"></div>
 
-      <div className="sm:mx-auto sm:w-full sm:max-w-md text-center">
+      <div className="flex-1 flex flex-col justify-center py-12 px-4 sm:px-6 lg:px-8">
+        <div className="sm:mx-auto sm:w-full sm:max-w-md text-center">
         <StoqoLogo variant="full" theme="light" size="lg" showTagline={true} />
         <p className="mt-2 text-xs text-stone-500">
           Restaurant Inventory & Store Management SaaS
@@ -356,9 +358,41 @@ export const AuthView: React.FC = () => {
                 <span>14-day full access trial included (₹799/mo)</span>
               </div>
             </div>
+
+            <p className="mt-5 pt-4 border-t border-stone-100 text-[11px] text-stone-500 text-center leading-relaxed">
+              By signing in or creating an account, you agree to STOQO&apos;s{' '}
+              <a
+                href="/terms-and-conditions"
+                onClick={(e) => {
+                  e.preventDefault();
+                  window.history.pushState({}, '', '/terms-and-conditions');
+                  window.dispatchEvent(new PopStateEvent('popstate'));
+                }}
+                className="font-semibold text-[#0D2149] hover:text-[#FF5A1F] underline underline-offset-2"
+              >
+                Terms &amp; Conditions
+              </a>{' '}
+              and acknowledge our{' '}
+              <a
+                href="/privacy-policy"
+                onClick={(e) => {
+                  e.preventDefault();
+                  window.history.pushState({}, '', '/privacy-policy');
+                  window.dispatchEvent(new PopStateEvent('popstate'));
+                }}
+                className="font-semibold text-[#0D2149] hover:text-[#FF5A1F] underline underline-offset-2"
+              >
+                Privacy Policy
+              </a>
+              .
+            </p>
           </div>
         </div>
       </div>
+      </div>
+
+      {/* Public Website Footer */}
+      <LegalFooter variant="full" />
     </div>
   );
 };

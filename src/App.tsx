@@ -28,8 +28,23 @@ import { AIAssistantView } from './views/AIAssistantView';
 import { SubscriptionView } from './views/SubscriptionView';
 import { AuditLogsView } from './views/AuditLogsView';
 import { SettingsView } from './views/SettingsView';
+import { PrivacyPolicyView } from './views/PrivacyPolicyView';
+import { TermsAndConditionsView } from './views/TermsAndConditionsView';
+import { LegalFooter } from './components/layout/LegalFooter';
 import { LoadingScreen } from './components/loading/LoadingScreen';
 import { OfflineBanner } from './components/pwa/OfflineBanner';
+
+function getPublicLegalRoute(): 'privacy' | 'terms' | null {
+  if (typeof window === 'undefined') return null;
+  const path = window.location.pathname.toLowerCase().replace(/\/+$/, '');
+  if (path === '/privacy-policy') {
+    return 'privacy';
+  }
+  if (path === '/terms-and-conditions') {
+    return 'terms';
+  }
+  return null;
+}
 
 const AppContent: React.FC = () => {
   const {
@@ -47,6 +62,40 @@ const AppContent: React.FC = () => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isNotifsOpen, setIsNotifsOpen] = useState(false);
   const [isTransitionDone, setIsTransitionDone] = useState(false);
+  const [publicLegalRoute, setPublicLegalRoute] = useState<'privacy' | 'terms' | null>(
+    getPublicLegalRoute
+  );
+
+  React.useEffect(() => {
+    const syncRoute = () => setPublicLegalRoute(getPublicLegalRoute());
+    window.addEventListener('popstate', syncRoute);
+    return () => {
+      window.removeEventListener('popstate', syncRoute);
+    };
+  }, []);
+
+  // Dedicated standalone legal routes (publicly accessible without login)
+  if (publicLegalRoute === 'privacy') {
+    return (
+      <PrivacyPolicyView
+        onBack={() => {
+          window.history.pushState({}, '', '/');
+          setPublicLegalRoute(null);
+        }}
+      />
+    );
+  }
+
+  if (publicLegalRoute === 'terms') {
+    return (
+      <TermsAndConditionsView
+        onBack={() => {
+          window.history.pushState({}, '', '/');
+          setPublicLegalRoute(null);
+        }}
+      />
+    );
+  }
 
   // Premium SaaS Loading Screen with real Firebase/Auth state
   if (!isTransitionDone) {
@@ -127,6 +176,8 @@ const AppContent: React.FC = () => {
             {activeTab === 'audit_logs' && <AuditLogsView />}
             {activeTab === 'staff' && <SettingsView />}
             {activeTab === 'settings' && <SettingsView />}
+
+            <LegalFooter variant="compact" />
           </div>
         </main>
       </div>

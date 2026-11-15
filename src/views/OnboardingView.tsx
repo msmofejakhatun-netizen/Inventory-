@@ -3,6 +3,7 @@ import { Store, Globe, Layers, CheckCircle, ArrowRight, Loader2, Plus, X } from 
 import { useAuth } from '../context/AuthContext';
 import { createRestaurantWithDefaults } from '../services/restaurantService';
 import { StoqoLogo } from '../components/brand/StoqoLogo';
+import { LegalFooter } from '../components/layout/LegalFooter';
 
 interface OnboardingViewProps {
   onComplete?: () => void;
@@ -136,8 +137,9 @@ export const OnboardingView: React.FC<OnboardingViewProps> = ({ onComplete }) =>
   };
 
   return (
-    <div className="min-h-screen bg-stone-100 flex flex-col justify-center py-12 px-4 sm:px-6 lg:px-8">
-      <div className="sm:mx-auto sm:w-full sm:max-w-xl text-center">
+    <div className="min-h-screen bg-stone-100 flex flex-col justify-between">
+      <div className="flex-1 flex flex-col justify-center py-12 px-4 sm:px-6 lg:px-8">
+        <div className="sm:mx-auto sm:w-full sm:max-w-xl text-center">
         <StoqoLogo variant="full" theme="light" size="md" showTagline={true} />
         <h2 className="mt-3 text-2xl font-black text-stone-900 tracking-tight">
           Welcome to STOQO
@@ -391,8 +393,39 @@ export const OnboardingView: React.FC<OnboardingViewProps> = ({ onComplete }) =>
               </div>
             </div>
           )}
+
+          <p className="mt-6 pt-4 border-t border-stone-100 text-[11px] text-stone-500 text-center">
+            By registering your restaurant, you agree to STOQO&apos;s{' '}
+            <a
+              href="/terms-and-conditions"
+              onClick={(e) => {
+                e.preventDefault();
+                window.history.pushState({}, '', '/terms-and-conditions');
+                window.dispatchEvent(new PopStateEvent('popstate'));
+              }}
+              className="font-semibold text-[#0D2149] hover:text-[#FF5A1F] underline underline-offset-2"
+            >
+              Terms &amp; Conditions
+            </a>{' '}
+            and{' '}
+            <a
+              href="/privacy-policy"
+              onClick={(e) => {
+                e.preventDefault();
+                window.history.pushState({}, '', '/privacy-policy');
+                window.dispatchEvent(new PopStateEvent('popstate'));
+              }}
+              className="font-semibold text-[#0D2149] hover:text-[#FF5A1F] underline underline-offset-2"
+            >
+              Privacy Policy
+            </a>
+            .
+          </p>
         </div>
       </div>
+      </div>
+
+      <LegalFooter variant="full" />
     </div>
   );
 };

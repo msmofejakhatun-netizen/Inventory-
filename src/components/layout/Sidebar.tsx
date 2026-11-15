@@ -25,6 +25,7 @@ import { useAuth } from '../../context/AuthContext';
 import { UserRole } from '../../types';
 import { SidebarInstallButton } from '../pwa/SidebarInstallButton';
 import { StoqoLogo } from '../brand/StoqoLogo';
+import { navigateToRoute } from './LegalFooter';
 
 export type NavTab =
   | 'dashboard'
@@ -214,11 +215,38 @@ export const Sidebar: React.FC<SidebarProps> = ({
         {/* PWA Install Action if supported by browser */}
         <SidebarInstallButton />
 
-        {/* Subscription trial strip */}
-        <div className="p-3 border-t border-stone-800 text-[11px] bg-stone-950/40">
+        {/* Subscription trial strip & Legal Page Links */}
+        <div className="p-3 border-t border-stone-800 text-[11px] bg-stone-950/40 space-y-2">
           <div className="flex items-center justify-between text-stone-400">
             <span>₹799/mo Pro SaaS</span>
             <span className="text-emerald-400 font-medium">14-Day Trial</span>
+          </div>
+          <div className="pt-2 border-t border-stone-800/80 flex items-center justify-between text-[10px] text-stone-400">
+            <a
+              href="/privacy-policy"
+              onClick={(e) => {
+                e.preventDefault();
+                onCloseMobile();
+                navigateToRoute('/privacy-policy');
+              }}
+              className="hover:text-white underline underline-offset-2 transition-colors"
+            >
+              Privacy Policy
+            </a>
+            <span aria-hidden="true" className="text-stone-700">
+              ·
+            </span>
+            <a
+              href="/terms-and-conditions"
+              onClick={(e) => {
+                e.preventDefault();
+                onCloseMobile();
+                navigateToRoute('/terms-and-conditions');
+              }}
+              className="hover:text-white underline underline-offset-2 transition-colors"
+            >
+              Terms &amp; Conditions
+            </a>
           </div>
         </div>
       </aside>
