@@ -16,8 +16,6 @@ import {
   normalizePhoneNumber,
   generatePoMessageText,
   sendMetaCloudApiMessage,
-  uploadMetaMedia,
-  sendMetaCloudApiImageMessage,
   verifyMetaCredentials,
   recordWhatsAppAuditLog,
   getRestaurantWhatsAppConfig,
@@ -28,15 +26,32 @@ import {
   removeTenantSecureToken,
   resolveRestaurantForMetaEvent,
   verifyMetaWebhookSignature,
+  extractBearerToken,
+  verifyRestaurantOwnerAccess,
+  getMetaAppCredentials,
+  getMetaEmbeddedSignupConfig,
+  exchangeEmbeddedSignupCode,
+  inspectMetaAccessToken,
+  verifyMetaWaba,
+  subscribeAppToWaba,
+  fetchWabaPhoneNumbers,
+  registerCloudApiPhoneNumber,
+  syncCoexistenceAppData,
+  firestoreRestGetDoc,
+  firestoreRestPatchDoc,
 } from './whatsappService';
 import { PurchaseOrder, Vendor, Restaurant } from '../src/types';
-import { WhatsAppMessageRecord } from './types';
+import {
+  WhatsAppConfig,
+  WhatsAppMessageRecord,
+  WhatsAppVerificationChecks,
+  WhatsAppWebhookStatus,
+} from './types';
 import { generateServerPoImageBuffer } from './excelPoImageServer';
 
 export const whatsappRouter = Router();
 
 // Canonical environment variable: WHATSAPP_VERIFY_TOKEN
-// If WHATSAPP_WEBHOOK_VERIFY_TOKEN exists, make it an alias of WHATSAPP_VERIFY_TOKEN to prevent inconsistency
 if (!process.env.WHATSAPP_VERIFY_TOKEN && process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN) {
   process.env.WHATSAPP_VERIFY_TOKEN = process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN;
 }
@@ -45,73 +60,553 @@ if (process.env.WHATSAPP_VERIFY_TOKEN && !process.env.WHATSAPP_WEBHOOK_VERIFY_TO
 }
 
 /**
+ * GET /api/whatsapp/embedded-signup/config
+ * Returns public Meta Embedded Signup configuration and exact missing prerequisites (never secrets).
+ */
+whatsappRouter.get('/embedded-signup/config', (req: Request, res: Response) => {
+  try {
+    const forwardedProto = req.headers['x-forwarded-proto'] as string | undefined;
+    const host = req.headers.host;
+    const inferredOrigin =
+      process.env.APP_URL ||
+      (host ? `${forwardedProto || req.protocol || 'https'}://${host}` : '');
+
+    const signupConfig = getMetaEmbeddedSignupConfig(inferredOrigin);
+    return res.json(signupConfig);
+  } catch (err) {
+    console.error('Embedded Signup config error:', err);
+    return res.status(500).json({
+      ready: false,
+      error: 'Failed to inspect Meta Embedded Signup configuration',
+    });
+  }
+});
+
+/**
+ * POST /api/whatsapp/embedded-signup/complete
+ * OWNER-ONLY: Exchanges official Meta Embedded Signup OAuth code on the backend,
+ * verifies WABA, Cloud API permissions, registered phone number, and webhook subscription,
+ * stores the token strictly server-side, and returns real verified state.
+ */
+whatsappRouter.post('/embedded-signup/complete', async (req: Request, res: Response) => {
+  try {
+    const idToken = extractBearerToken(req.headers.authorization);
+    const {
+      restaurantId,
+      code,
+      wabaId: rawWabaId,
+      phoneNumberId: rawPhoneNumberId,
+      businessId: rawBusinessId,
+      eventType,
+      coexistenceRequested,
+      userUid,
+      userName,
+      userRole,
+    } = req.body || {};
+
+    if (!restaurantId) {
+      return res.status(400).json({ error: 'restaurantId is required' });
+    }
+
+    const ownerCheck = await verifyRestaurantOwnerAccess({
+      restaurantId,
+      idToken,
+      fallbackUid: userUid,
+      fallbackRole: userRole,
+    });
+
+    if (!ownerCheck.authorized) {
+      return res.status(403).json({
+        error: ownerCheck.reason || 'Forbidden: Only the restaurant Owner can connect WhatsApp Business.',
+      });
+    }
+
+    const { appId, appSecret, verifyToken } = getMetaAppCredentials();
+    const missingServerVars: string[] = [];
+    if (!appId) missingServerVars.push('META_APP_ID (and VITE_META_APP_ID)');
+    if (!appSecret) missingServerVars.push('META_APP_SECRET');
+
+    if (missingServerVars.length > 0) {
+      return res.status(400).json({
+        status: 'ACTION_REQUIRED',
+        code: 'META_CONFIGURATION_MISSING',
+        missingRequirements: missingServerVars,
+        error: `Meta Embedded Signup V4 cannot complete on the server because required configuration is missing: ${missingServerVars.join(', ')}.`,
+      });
+    }
+
+    if (!code || typeof code !== 'string' || !code.trim()) {
+      return res.status(400).json({
+        status: 'ACTION_REQUIRED',
+        code: 'OAUTH_CODE_MISSING',
+        error: 'Meta Embedded Signup authorization code was not received. Please complete the Meta login dialog and try again.',
+      });
+    }
+
+    // 1. Exchange authorization code for Meta Business/User access token (server-side only)
+    const tokenExchange = await exchangeEmbeddedSignupCode({
+      appId,
+      appSecret,
+      code: code.trim(),
+    });
+
+    const now = new Date().toISOString();
+
+    if (!tokenExchange.ok || !tokenExchange.accessToken) {
+      await saveRestaurantWhatsAppConfig(
+        restaurantId,
+        {
+          connected: false,
+          status: 'CONNECTION_ERROR',
+          healthStatus: 'UNHEALTHY',
+          apiStatus: 'UNHEALTHY',
+          webhookStatus: 'ERROR',
+          lastError: tokenExchange.error || 'Meta OAuth code exchange failed',
+          lastHealthCheckAt: now,
+        },
+        idToken
+      );
+
+      return res.status(400).json({
+        connected: false,
+        status: 'CONNECTION_ERROR',
+        error: `Meta OAuth code exchange failed: ${tokenExchange.error}`,
+      });
+    }
+
+    const accessToken = tokenExchange.accessToken;
+
+    // 2. Inspect token validity, permissions, and granular WABA target IDs
+    const tokenInfo = await inspectMetaAccessToken({
+      accessToken,
+      appId,
+      appSecret,
+    });
+
+    if (!tokenInfo.ok || !tokenInfo.isValid) {
+      await saveRestaurantWhatsAppConfig(
+        restaurantId,
+        {
+          connected: false,
+          status: 'CONNECTION_ERROR',
+          healthStatus: 'UNHEALTHY',
+          apiStatus: 'UNHEALTHY',
+          webhookStatus: 'ERROR',
+          lastError: tokenInfo.error || 'Meta access token verification failed',
+          lastHealthCheckAt: now,
+        },
+        idToken
+      );
+
+      return res.status(400).json({
+        connected: false,
+        status: 'CONNECTION_ERROR',
+        error: `Meta access token validation failed: ${tokenInfo.error}`,
+      });
+    }
+
+    const grantedPermissions = tokenInfo.grantedPermissions;
+    const hasMessagingPerm =
+      grantedPermissions.length === 0 ||
+      grantedPermissions.includes('whatsapp_business_messaging');
+    const hasManagementPerm =
+      grantedPermissions.length === 0 ||
+      grantedPermissions.includes('whatsapp_business_management');
+    const permissionsVerified = hasMessagingPerm && hasManagementPerm;
+
+    const wabaId = (rawWabaId || tokenInfo.resolvedWabaId || '').trim();
+    if (!wabaId) {
+      const reason =
+        'No WhatsApp Business Account (WABA) was selected or created during Meta Embedded Signup.';
+      await saveRestaurantWhatsAppConfig(
+        restaurantId,
+        {
+          connected: false,
+          status: 'ACTION_REQUIRED',
+          healthStatus: 'DEGRADED',
+          apiStatus: 'DEGRADED',
+          webhookStatus: 'ACTION_REQUIRED',
+          actionRequiredReason: reason,
+          lastError: reason,
+          lastHealthCheckAt: now,
+        },
+        idToken
+      );
+
+      return res.status(400).json({
+        connected: false,
+        status: 'ACTION_REQUIRED',
+        error: reason,
+      });
+    }
+
+    // 3. Verify WABA account with Meta Graph API
+    const wabaCheck = await verifyMetaWaba({ wabaId, accessToken });
+    if (!wabaCheck.ok) {
+      const errMsg = wabaCheck.error || 'Failed to verify WhatsApp Business Account with Meta';
+      await saveRestaurantWhatsAppConfig(
+        restaurantId,
+        {
+          connected: false,
+          status: 'CONNECTION_ERROR',
+          healthStatus: 'UNHEALTHY',
+          apiStatus: 'UNHEALTHY',
+          webhookStatus: 'ERROR',
+          businessAccountId: wabaId,
+          lastError: errMsg,
+          lastHealthCheckAt: now,
+        },
+        idToken
+      );
+
+      return res.status(400).json({
+        connected: false,
+        status: 'CONNECTION_ERROR',
+        error: errMsg,
+      });
+    }
+
+    // 4. Subscribe STOQO app webhook to the customer's WABA
+    const subscriptionResult = await subscribeAppToWaba({ wabaId, accessToken });
+    const webhookEndpointVerified = Boolean(appSecret && verifyToken);
+    const webhookSubscribed = subscriptionResult.ok && subscriptionResult.subscribed;
+    const webhookStatus: WhatsAppWebhookStatus =
+      webhookSubscribed && webhookEndpointVerified ? 'ACTIVE' : 'ACTION_REQUIRED';
+
+    // 5. Resolve & verify registered Phone Number
+    let phoneNumberId = (rawPhoneNumberId || '').trim();
+    if (!phoneNumberId) {
+      const numbersRes = await fetchWabaPhoneNumbers({ wabaId, accessToken });
+      if (numbersRes.ok && numbersRes.numbers.length > 0) {
+        const verifiedNum =
+          numbersRes.numbers.find((n) => n.code_verification_status === 'VERIFIED') ||
+          numbersRes.numbers[0];
+        phoneNumberId = verifiedNum.id;
+      }
+    }
+
+    // Store token securely server-side ONLY (isolated by restaurantId, never exposed to client)
+    setTenantSecureToken(restaurantId, accessToken);
+
+    const isCoexistence =
+      eventType === 'FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING' ||
+      Boolean(coexistenceRequested && eventType !== 'FINISH_ONLY_WABA');
+    const onboardingType: WhatsAppConfig['onboardingType'] =
+      eventType === 'FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING'
+        ? 'WHATSAPP_BUSINESS_APP_COEXISTENCE'
+        : eventType === 'FINISH_ONLY_WABA'
+          ? 'WABA_ONLY'
+          : 'STANDARD_CLOUD_API';
+
+    if (!phoneNumberId) {
+      const checks: WhatsAppVerificationChecks = {
+        wabaVerified: true,
+        phoneVerified: false,
+        permissionsVerified,
+        webhookSubscribed,
+        webhookEndpointVerified,
+      };
+      const reason =
+        'WhatsApp Business Account was authorized, but phone number verification was not completed in Meta. Click Reconnect to register and verify your mobile number.';
+
+      await saveRestaurantWhatsAppConfig(
+        restaurantId,
+        {
+          connected: false,
+          status: 'ACTION_REQUIRED',
+          healthStatus: 'DEGRADED',
+          apiStatus: 'DEGRADED',
+          webhookStatus,
+          businessPhoneNumber: '',
+          verifiedName: '',
+          phoneNumberId: '',
+          businessAccountId: wabaId,
+          businessId: rawBusinessId || '',
+          wabaName: wabaCheck.wabaName || '',
+          connectedByUid: ownerCheck.uid || userUid || 'owner',
+          connectedByName: userName || 'Owner',
+          connectedAt: now,
+          coexistenceMode: isCoexistence,
+          onboardingType,
+          accountReviewStatus: wabaCheck.accountReviewStatus || '',
+          grantedPermissions,
+          verificationChecks: checks,
+          actionRequiredReason: reason,
+          lastError: reason,
+          lastHealthCheckAt: now,
+          hasCustomAccessToken: true,
+        },
+        idToken
+      );
+
+      await recordWhatsAppAuditLog({
+        restaurantId,
+        actorUid: ownerCheck.uid || userUid || 'system',
+        actorName: userName || 'Owner',
+        action: 'WHATSAPP_EMBEDDED_SIGNUP_ACTION_REQUIRED',
+        entityId: wabaId,
+        details: reason,
+        idToken,
+      });
+
+      return res.json({
+        success: false,
+        connected: false,
+        status: 'ACTION_REQUIRED',
+        healthStatus: 'DEGRADED',
+        apiStatus: 'DEGRADED',
+        webhookStatus,
+        businessAccountId: wabaId,
+        wabaName: wabaCheck.wabaName || '',
+        verificationChecks: checks,
+        error: reason,
+      });
+    }
+
+    const phoneCheck = await verifyMetaCredentials(phoneNumberId, accessToken);
+    if (!phoneCheck.ok) {
+      const checks: WhatsAppVerificationChecks = {
+        wabaVerified: true,
+        phoneVerified: false,
+        permissionsVerified,
+        webhookSubscribed,
+        webhookEndpointVerified,
+      };
+      const errMsg = phoneCheck.error || 'Failed to verify WhatsApp Business phone number with Meta';
+
+      await saveRestaurantWhatsAppConfig(
+        restaurantId,
+        {
+          connected: false,
+          status: 'CONNECTION_ERROR',
+          healthStatus: 'UNHEALTHY',
+          apiStatus: 'UNHEALTHY',
+          webhookStatus,
+          phoneNumberId,
+          businessAccountId: wabaId,
+          businessId: rawBusinessId || '',
+          wabaName: wabaCheck.wabaName || '',
+          verificationChecks: checks,
+          lastError: errMsg,
+          lastHealthCheckAt: now,
+          hasCustomAccessToken: true,
+        },
+        idToken
+      );
+
+      return res.status(400).json({
+        connected: false,
+        status: 'CONNECTION_ERROR',
+        error: errMsg,
+      });
+    }
+
+    const phoneNotVerified =
+      Boolean(phoneCheck.codeVerificationStatus) &&
+      phoneCheck.codeVerificationStatus !== 'VERIFIED';
+
+    // 6. Complete Cloud API Phone Number Registration (`POST /{phoneNumberId}/register`)
+    // or initiate Coexistence app state/history sync (`POST /{phoneNumberId}/smb_app_data`)
+    if (!phoneNotVerified) {
+      if (isCoexistence) {
+        await syncCoexistenceAppData({ phoneNumberId, accessToken });
+      } else if (phoneCheck.phoneStatus !== 'CONNECTED') {
+        const regResult = await registerCloudApiPhoneNumber({
+          phoneNumberId,
+          accessToken,
+        });
+        if (!regResult.ok) {
+          console.warn(
+            `[WhatsApp Embedded Signup] Phone registration notice for ${phoneNumberId}: ${regResult.error}`
+          );
+        }
+      }
+    }
+
+    const checks: WhatsAppVerificationChecks = {
+      wabaVerified: true,
+      phoneVerified: !phoneNotVerified,
+      permissionsVerified,
+      webhookSubscribed,
+      webhookEndpointVerified,
+    };
+
+    const actionReasons: string[] = [];
+    if (phoneNotVerified) {
+      actionReasons.push(
+        `Phone number verification status is ${phoneCheck.codeVerificationStatus}. Complete OTP verification in Meta.`
+      );
+    }
+    if (!permissionsVerified) {
+      actionReasons.push(
+        'Missing required Meta Cloud API permissions: whatsapp_business_management and whatsapp_business_messaging.'
+      );
+    }
+    if (!webhookSubscribed) {
+      actionReasons.push(
+        subscriptionResult.error || 'WABA webhook subscription could not be verified.'
+      );
+    }
+    if (!webhookEndpointVerified) {
+      actionReasons.push(
+        'Server webhook verification token (WHATSAPP_VERIFY_TOKEN) is not configured yet.'
+      );
+    }
+
+    const fullyConnected =
+      checks.wabaVerified &&
+      checks.phoneVerified &&
+      checks.permissionsVerified &&
+      checks.webhookSubscribed &&
+      checks.webhookEndpointVerified;
+
+    const finalStatus = fullyConnected ? 'CONNECTED' : 'ACTION_REQUIRED';
+    const finalHealth = fullyConnected ? 'HEALTHY' : 'DEGRADED';
+    const finalApiStatus = checks.phoneVerified && checks.permissionsVerified ? 'HEALTHY' : 'DEGRADED';
+    const actionReasonStr = actionReasons.join(' ');
+
+    const configData: Partial<WhatsAppConfig> = {
+      connected: fullyConnected,
+      status: finalStatus,
+      healthStatus: finalHealth,
+      apiStatus: finalApiStatus,
+      webhookStatus,
+      businessPhoneNumber: phoneCheck.displayPhoneNumber || '',
+      verifiedName: phoneCheck.verifiedName || wabaCheck.wabaName || '',
+      phoneNumberId,
+      businessAccountId: wabaId,
+      businessId: rawBusinessId || '',
+      wabaName: wabaCheck.wabaName || '',
+      connectedByUid: ownerCheck.uid || userUid || 'owner',
+      connectedByName: userName || 'Owner',
+      connectedAt: now,
+      lastHealthCheckAt: now,
+      lastError: actionReasonStr,
+      actionRequiredReason: actionReasonStr,
+      coexistenceMode: isCoexistence,
+      onboardingType,
+      codeVerificationStatus: phoneCheck.codeVerificationStatus || 'VERIFIED',
+      qualityRating: phoneCheck.qualityRating || '',
+      accountReviewStatus: wabaCheck.accountReviewStatus || '',
+      grantedPermissions,
+      verificationChecks: checks,
+      hasCustomAccessToken: true,
+    };
+
+    await saveRestaurantWhatsAppConfig(restaurantId, configData, idToken);
+
+    await recordWhatsAppAuditLog({
+      restaurantId,
+      actorUid: ownerCheck.uid || userUid || 'system',
+      actorName: userName || 'Owner',
+      action: fullyConnected
+        ? 'WHATSAPP_EMBEDDED_SIGNUP_CONNECTED'
+        : 'WHATSAPP_EMBEDDED_SIGNUP_ACTION_REQUIRED',
+      entityId: phoneNumberId,
+      details: fullyConnected
+        ? `Connected WhatsApp Business ${phoneCheck.displayPhoneNumber || phoneNumberId} via official Meta Embedded Signup (${onboardingType})`
+        : `Embedded Signup partially completed (${finalStatus}): ${actionReasonStr}`,
+      idToken,
+    });
+
+    return res.json({
+      success: fullyConnected,
+      connected: fullyConnected,
+      status: finalStatus,
+      healthStatus: finalHealth,
+      apiStatus: finalApiStatus,
+      webhookStatus,
+      businessPhoneNumber: configData.businessPhoneNumber,
+      verifiedName: configData.verifiedName,
+      phoneNumberId,
+      businessAccountId: wabaId,
+      wabaName: configData.wabaName,
+      coexistenceMode: isCoexistence,
+      onboardingType,
+      verificationChecks: checks,
+      error: actionReasonStr || null,
+      message: fullyConnected
+        ? 'WhatsApp Business connected and verified via official Meta Embedded Signup'
+        : actionReasonStr,
+    });
+  } catch (err) {
+    console.error('Embedded Signup completion error:', err);
+    return res.status(500).json({
+      connected: false,
+      status: 'CONNECTION_ERROR',
+      error: err instanceof Error ? err.message : 'Failed to complete Meta WhatsApp Embedded Signup',
+    });
+  }
+});
+
+/**
  * GET /api/whatsapp/status
  * Check restaurant WhatsApp connection and health
  */
 whatsappRouter.get('/status', async (req: Request, res: Response) => {
   try {
     const restaurantId = req.query.restaurantId as string | undefined;
+    const idToken = extractBearerToken(req.headers.authorization);
 
+    const { appId, configId, appSecret, verifyToken } = getMetaAppCredentials();
     const hasAccessToken = Boolean(process.env.WHATSAPP_ACCESS_TOKEN);
-    const hasAppSecret = Boolean(process.env.WHATSAPP_APP_SECRET);
-    const hasVerifyToken = Boolean(process.env.WHATSAPP_VERIFY_TOKEN);
+    const hasAppSecret = Boolean(appSecret);
+    const hasVerifyToken = Boolean(verifyToken);
 
-    // If no restaurantId is provided, return overall server-side WhatsApp Cloud API configuration health
     if (!restaurantId) {
-      const isServerReady = hasAccessToken && hasAppSecret && hasVerifyToken;
+      const isServerReady = Boolean(appId && configId && hasAppSecret && hasVerifyToken);
       const missingConfigs: string[] = [];
-      if (!hasAccessToken) missingConfigs.push('WHATSAPP_ACCESS_TOKEN');
+      if (!appId) missingConfigs.push('META_APP_ID');
+      if (!configId) missingConfigs.push('META_EMBEDDED_SIGNUP_CONFIG_ID');
       if (!hasAppSecret) missingConfigs.push('WHATSAPP_APP_SECRET');
       if (!hasVerifyToken) missingConfigs.push('WHATSAPP_VERIFY_TOKEN');
 
       return res.json({
-        service: 'WhatsApp Business Platform Cloud API',
+        service: 'WhatsApp Business Platform Cloud API (Embedded Signup)',
         serverConfigured: isServerReady,
+        hasMetaAppId: Boolean(appId),
+        hasEmbeddedSignupConfigId: Boolean(configId),
         hasAccessToken,
         hasAppSecret,
         hasVerifyToken,
         webhookPath: '/api/whatsapp/webhook',
         missingConfig: missingConfigs.length > 0 ? missingConfigs : null,
         message: isServerReady
-          ? 'WhatsApp Business Cloud API server configuration is healthy and active'
-          : `Server environment is missing required variables: ${missingConfigs.join(', ')}. Please set them in AI Studio environment variables or .env.`,
+          ? 'WhatsApp Business Embedded Signup & Cloud API server configuration is ready'
+          : `Server environment is missing Meta Embedded Signup variables: ${missingConfigs.join(', ')}.`,
       });
     }
 
-    const config = await getRestaurantWhatsAppConfig(restaurantId);
-    if (!config || !config.connected) {
-      return res.json({
-        connected: false,
-        status: 'DISCONNECTED',
-        healthStatus: 'DISCONNECTED',
-        restaurantId,
-        businessPhoneNumber: config?.businessPhoneNumber || '',
-        phoneNumberId: config?.phoneNumberId || '',
-        businessAccountId: config?.businessAccountId || '',
-        error: 'WhatsApp Business is not connected for this restaurant. Please connect in Settings.',
-      });
-    }
-
-    const health = await checkWhatsAppHealth(restaurantId);
+    const health = await checkWhatsAppHealth(restaurantId, idToken);
+    const config = await getRestaurantWhatsAppConfig(restaurantId, idToken);
 
     return res.json({
       connected: health.connected,
       status: health.status,
       healthStatus: health.healthStatus,
+      apiStatus: health.apiStatus,
+      webhookStatus: health.webhookStatus,
       restaurantId,
-      businessPhoneNumber: health.businessPhoneNumber || config.businessPhoneNumber || '',
-      phoneNumberId: config.phoneNumberId || '',
-      businessAccountId: config.businessAccountId || '',
-      connectedByName: config.connectedByName || 'Owner',
-      connectedAt: config.connectedAt || '',
-      lastHealthCheckAt: health.lastHealthCheckAt || config.lastHealthCheckAt || '',
-      lastWebhookAt: config.lastWebhookAt || '',
-      lastSuccessfulMessageAt: config.lastSuccessfulMessageAt || '',
-      error: health.error || config.lastError || null,
+      businessPhoneNumber: health.businessPhoneNumber || config?.businessPhoneNumber || '',
+      verifiedName: health.verifiedName || config?.verifiedName || '',
+      phoneNumberId: health.phoneNumberId || config?.phoneNumberId || '',
+      businessAccountId: health.businessAccountId || config?.businessAccountId || '',
+      wabaName: config?.wabaName || '',
+      coexistenceMode: Boolean(health.coexistenceMode || config?.coexistenceMode),
+      onboardingType: config?.onboardingType || 'STANDARD_CLOUD_API',
+      verificationChecks: health.verificationChecks || config?.verificationChecks || null,
+      connectedByName: config?.connectedByName || 'Owner',
+      connectedAt: config?.connectedAt || '',
+      lastHealthCheckAt: health.lastHealthCheckAt || config?.lastHealthCheckAt || '',
+      lastWebhookAt: health.lastWebhookAt || config?.lastWebhookAt || '',
+      lastSuccessfulMessageAt:
+        health.lastSuccessfulMessageAt || config?.lastSuccessfulMessageAt || '',
+      error: health.error || config?.lastError || null,
     });
   } catch (err) {
     console.error('WhatsApp status check error:', err);
     return res.status(500).json({
+      status: 'CONNECTION_ERROR',
       error: 'Failed to retrieve WhatsApp status',
       details: err instanceof Error ? err.message : 'Unknown server error',
     });
@@ -120,106 +615,14 @@ whatsappRouter.get('/status', async (req: Request, res: Response) => {
 
 /**
  * POST /api/whatsapp/connect
- * OWNER-ONLY: Connects official WhatsApp Business number
+ * Legacy manual credentials endpoint replaced by Official Meta Embedded Signup.
  */
-whatsappRouter.post('/connect', async (req: Request, res: Response) => {
-  try {
-    const {
-      restaurantId,
-      businessPhoneNumber,
-      phoneNumberId,
-      businessAccountId,
-      accessToken,
-      userUid,
-      userName,
-      userRole,
-    } = req.body;
-
-    if (!restaurantId) {
-      return res.status(400).json({ error: 'restaurantId is required' });
-    }
-
-    // STRICT OWNER CHECK
-    const restDocRef = doc(db, 'restaurants', restaurantId);
-    const restSnap = await getDoc(restDocRef);
-    const restaurant = restSnap.data() as Restaurant | undefined;
-
-    const isOwner = userRole === 'OWNER' || (restaurant && restaurant.ownerUid === userUid);
-    if (!isOwner) {
-      return res.status(403).json({
-        error: 'Forbidden: Only the restaurant Owner is authorized to connect or manage WhatsApp Business.',
-      });
-    }
-
-    if (!businessPhoneNumber?.trim()) {
-      return res.status(400).json({ error: 'businessPhoneNumber is required' });
-    }
-    if (!phoneNumberId?.trim()) {
-      return res.status(400).json({ error: 'phoneNumberId is required' });
-    }
-    if (!businessAccountId?.trim()) {
-      return res.status(400).json({ error: 'businessAccountId is required' });
-    }
-
-    // Resolve token: provided or env
-    const tokenToUse = accessToken?.trim() || process.env.WHATSAPP_ACCESS_TOKEN || '';
-    if (!tokenToUse) {
-      return res.status(400).json({
-        error:
-          'No WhatsApp Access Token available. Provide an access token or configure WHATSAPP_ACCESS_TOKEN on the server.',
-      });
-    }
-
-    // Test credentials with Meta Graph API
-    const metaTest = await verifyMetaCredentials(phoneNumberId.trim(), tokenToUse);
-    if (!metaTest.ok) {
-      return res.status(400).json({
-        error: `Meta WhatsApp Cloud API verification failed: ${metaTest.error}`,
-      });
-    }
-
-    // Save custom token into server vault if provided
-    if (accessToken?.trim()) {
-      setTenantSecureToken(restaurantId, accessToken.trim());
-    }
-
-    const now = new Date().toISOString();
-    const configData = {
-      connected: true,
-      status: 'CONNECTED' as const,
-      healthStatus: 'HEALTHY' as const,
-      businessPhoneNumber: businessPhoneNumber.trim(),
-      phoneNumberId: phoneNumberId.trim(),
-      businessAccountId: businessAccountId.trim(),
-      connectedByUid: userUid || 'unknown_owner',
-      connectedByName: userName || 'Owner',
-      connectedAt: now,
-      lastHealthCheckAt: now,
-      lastError: '',
-      hasCustomAccessToken: Boolean(accessToken?.trim()),
-    };
-
-    await saveRestaurantWhatsAppConfig(restaurantId, configData);
-
-    await recordWhatsAppAuditLog({
-      restaurantId,
-      actorUid: userUid || 'system',
-      actorName: userName || 'Owner',
-      action: 'WHATSAPP_CONNECTED',
-      details: `Connected official WhatsApp number ${businessPhoneNumber.trim()} (Phone ID: ${phoneNumberId.trim()})`,
-    });
-
-    return res.json({
-      success: true,
-      message: 'WhatsApp Business connected and verified successfully',
-      data: configData,
-    });
-  } catch (err) {
-    console.error('WhatsApp connect error:', err);
-    return res.status(500).json({
-      error: err instanceof Error ? err.message : 'Failed to connect WhatsApp Business',
-    });
-  }
+whatsappRouter.post('/connect', (_req: Request, res: Response) => {
+  return res.status(410).json({
+    code: 'MANUAL_CONNECT_REPLACED',
+    error:
+      'Manual Phone Number ID / WABA ID / Access Token connection has been replaced by Official Meta WhatsApp Embedded Signup. Click "Connect WhatsApp Business" in Settings.',
+  });
 });
 
 /**
@@ -228,44 +631,59 @@ whatsappRouter.post('/connect', async (req: Request, res: Response) => {
  */
 whatsappRouter.post('/disconnect', async (req: Request, res: Response) => {
   try {
-    const { restaurantId, userUid, userName, userRole } = req.body;
+    const idToken = extractBearerToken(req.headers.authorization);
+    const { restaurantId, userUid, userName, userRole } = req.body || {};
 
     if (!restaurantId) {
       return res.status(400).json({ error: 'restaurantId is required' });
     }
 
-    // STRICT OWNER CHECK
-    const restDocRef = doc(db, 'restaurants', restaurantId);
-    const restSnap = await getDoc(restDocRef);
-    const restaurant = restSnap.data() as Restaurant | undefined;
+    const ownerCheck = await verifyRestaurantOwnerAccess({
+      restaurantId,
+      idToken,
+      fallbackUid: userUid,
+      fallbackRole: userRole,
+    });
 
-    const isOwner = userRole === 'OWNER' || (restaurant && restaurant.ownerUid === userUid);
-    if (!isOwner) {
+    if (!ownerCheck.authorized) {
       return res.status(403).json({
-        error: 'Forbidden: Only the restaurant Owner is authorized to disconnect WhatsApp Business.',
+        error:
+          ownerCheck.reason ||
+          'Forbidden: Only the restaurant Owner is authorized to disconnect WhatsApp Business.',
       });
     }
 
     removeTenantSecureToken(restaurantId);
 
     const now = new Date().toISOString();
-    await saveRestaurantWhatsAppConfig(restaurantId, {
-      connected: false,
-      status: 'DISCONNECTED',
-      healthStatus: 'DISCONNECTED',
-      lastHealthCheckAt: now,
-    });
+    await saveRestaurantWhatsAppConfig(
+      restaurantId,
+      {
+        connected: false,
+        status: 'NOT_CONNECTED',
+        healthStatus: 'DISCONNECTED',
+        apiStatus: 'DISCONNECTED',
+        webhookStatus: 'INACTIVE',
+        lastError: '',
+        actionRequiredReason: '',
+        lastHealthCheckAt: now,
+        hasCustomAccessToken: false,
+      },
+      idToken
+    );
 
     await recordWhatsAppAuditLog({
       restaurantId,
-      actorUid: userUid || 'system',
+      actorUid: ownerCheck.uid || userUid || 'system',
       actorName: userName || 'Owner',
       action: 'WHATSAPP_DISCONNECTED',
       details: 'Disconnected official WhatsApp Business integration',
+      idToken,
     });
 
     return res.json({
       success: true,
+      status: 'NOT_CONNECTED',
       message: 'WhatsApp Business disconnected successfully',
     });
   } catch (err) {
@@ -311,16 +729,16 @@ whatsappRouter.get('/po-image/:restaurantId/:purchaseOrderId.png', async (req: R
 
 /**
  * POST /api/whatsapp/send-po
- * Staff and Manager endpoint to send an Excel-style Purchase Order Image via WhatsApp Cloud API
+ * Staff and Manager endpoint to send Purchase Order via WhatsApp Cloud API (PRESERVED LOGIC)
  */
 whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
   try {
+    const idToken = extractBearerToken(req.headers.authorization);
     const {
       restaurantId,
       purchaseOrderId,
       userUid,
       userName,
-      userRole,
       vendorPhone: bodyVendorPhone,
       messageBody: bodyMessageBody,
       po: bodyPo,
@@ -330,8 +748,7 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'restaurantId and purchaseOrderId are required' });
     }
 
-    // Check WhatsApp connection
-    const config = await getRestaurantWhatsAppConfig(restaurantId);
+    const config = await getRestaurantWhatsAppConfig(restaurantId, idToken);
     if (!config || !config.connected) {
       return res.status(400).json({
         code: 'WHATSAPP_NOT_CONFIGURED',
@@ -350,6 +767,13 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
     // Fetch PO
     let po: PurchaseOrder | undefined = bodyPo;
     const poRef = doc(db, 'restaurants', restaurantId, 'purchaseOrders', purchaseOrderId);
+    if (!po && idToken) {
+      const restPo = await firestoreRestGetDoc(
+        `restaurants/${restaurantId}/purchaseOrders/${purchaseOrderId}`,
+        idToken
+      );
+      if (restPo) po = restPo as PurchaseOrder;
+    }
     if (!po) {
       try {
         const poSnap = await getDoc(poRef);
@@ -367,6 +791,15 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
 
     // Fetch Vendor to get / verify phone
     let rawPhone = bodyVendorPhone || po.vendorPhone || '';
+    if (!rawPhone && po.vendorId && idToken) {
+      const restVendor = await firestoreRestGetDoc(
+        `restaurants/${restaurantId}/vendors/${po.vendorId}`,
+        idToken
+      );
+      if (restVendor) {
+        rawPhone = restVendor.phone || restVendor.mobile || '';
+      }
+    }
     if (!rawPhone && po.vendorId) {
       try {
         const vendorRef = doc(db, 'restaurants', restaurantId, 'vendors', po.vendorId);
@@ -399,33 +832,33 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
 
     // Fetch restaurant name
     let restaurantName = 'STOQO';
-    try {
-      const restDocRef = doc(db, 'restaurants', restaurantId);
-      const restSnap = await getDoc(restDocRef);
-      const restaurant = restSnap.data() as Restaurant | undefined;
-      if (restaurant?.name) restaurantName = restaurant.name;
-    } catch (rErr) {
-      console.warn('Could not fetch restaurant name:', rErr);
+    if (idToken) {
+      const restDoc = await firestoreRestGetDoc(`restaurants/${restaurantId}`, idToken);
+      if (restDoc?.name) restaurantName = restDoc.name;
+    } else {
+      try {
+        const restDocRef = doc(db, 'restaurants', restaurantId);
+        const restSnap = await getDoc(restDocRef);
+        const restaurant = restSnap.data() as Restaurant | undefined;
+        if (restaurant?.name) restaurantName = restaurant.name;
+      } catch (rErr) {
+        console.warn('Could not fetch restaurant name:', rErr);
+      }
     }
 
     // Generate dynamic WhatsApp PO text containing ONLY ITEM + QUANTITY + UNIT (NO prices/amounts/rates/totals)
     const messageBody = bodyMessageBody || generatePoMessageText(po, restaurantName, po.vendorName);
 
-    // Record pre-send audit
-    try {
-      await recordWhatsAppAuditLog({
-        restaurantId,
-        actorUid: userUid || 'system',
-        actorName: userName || 'Staff',
-        action: 'PO_WHATSAPP_SEND_REQUESTED',
-        entityId: po.id,
-        details: `Initiating official WhatsApp Cloud API text dispatch for PO #${po.poNumber} to ${normalizedPhone}`,
-      });
-    } catch (auditErr) {
-      console.warn('Could not record pre-send audit log:', auditErr);
-    }
+    await recordWhatsAppAuditLog({
+      restaurantId,
+      actorUid: userUid || 'system',
+      actorName: userName || 'Staff',
+      action: 'PO_WHATSAPP_SEND_REQUESTED',
+      entityId: po.id,
+      details: `Initiating official WhatsApp Cloud API text dispatch for PO #${po.poNumber} to ${normalizedPhone}`,
+      idToken,
+    });
 
-    // Send Text Message via Meta Cloud API
     let metaResult;
     try {
       metaResult = await sendMetaCloudApiMessage({
@@ -437,7 +870,6 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
     } catch (apiErr) {
       const errMsg = apiErr instanceof Error ? apiErr.message : String(apiErr);
 
-      // Record failed attempt in whatsappMessages
       const failedMsgId = `failed_${Date.now()}`;
       const failedRecord: WhatsAppMessageRecord = {
         id: failedMsgId,
@@ -458,8 +890,20 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
         sentByName: userName,
       };
 
-      const msgDocRef = doc(db, 'restaurants', restaurantId, 'whatsappMessages', failedMsgId);
-      await setDoc(msgDocRef, failedRecord);
+      if (idToken) {
+        await firestoreRestPatchDoc(
+          `restaurants/${restaurantId}/whatsappMessages/${failedMsgId}`,
+          failedRecord,
+          idToken
+        );
+      } else {
+        try {
+          const msgDocRef = doc(db, 'restaurants', restaurantId, 'whatsappMessages', failedMsgId);
+          await setDoc(msgDocRef, failedRecord);
+        } catch {
+          // client also records error
+        }
+      }
 
       await recordWhatsAppAuditLog({
         restaurantId,
@@ -468,6 +912,7 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
         action: 'PO_WHATSAPP_FAILED',
         entityId: po.id,
         details: `Failed to dispatch PO #${po.poNumber} via WhatsApp: ${errMsg}`,
+        idToken,
       });
 
       return res.status(502).json({
@@ -479,7 +924,6 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
     const messageId = metaResult.messageId;
     const now = new Date().toISOString();
 
-    // Store successful dispatch in whatsappMessages
     const messageRecord: WhatsAppMessageRecord = {
       id: messageId,
       restaurantId,
@@ -499,25 +943,48 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
     };
 
     try {
-      const msgDocRef = doc(db, 'restaurants', restaurantId, 'whatsappMessages', messageId);
-      await setDoc(msgDocRef, messageRecord);
+      if (idToken) {
+        await firestoreRestPatchDoc(
+          `restaurants/${restaurantId}/whatsappMessages/${messageId}`,
+          messageRecord,
+          idToken
+        );
+        await firestoreRestPatchDoc(
+          `restaurants/${restaurantId}/purchaseOrders/${purchaseOrderId}`,
+          {
+            status: 'SENT',
+            sentAt: now,
+            sentByUid: userUid || 'system',
+            sentByName: userName || 'Staff',
+            whatsappMessageId: messageId,
+            vendorPhone: normalizedPhone,
+            whatsappSessionInfo: 'Order dispatched via official WhatsApp Business Cloud API',
+            updatedAt: now,
+          },
+          idToken
+        );
+      } else {
+        const msgDocRef = doc(db, 'restaurants', restaurantId, 'whatsappMessages', messageId);
+        await setDoc(msgDocRef, messageRecord);
+        await updateDoc(poRef, {
+          status: 'SENT',
+          sentAt: now,
+          sentByUid: userUid || 'system',
+          sentByName: userName || 'Staff',
+          whatsappMessageId: messageId,
+          vendorPhone: normalizedPhone,
+          whatsappSessionInfo: 'Order dispatched via official WhatsApp Business Cloud API',
+          updatedAt: now,
+        });
+      }
 
-      // Update PO in Firestore
-      await updateDoc(poRef, {
-        status: 'SENT',
-        sentAt: now,
-        sentByUid: userUid || 'system',
-        sentByName: userName || 'Staff',
-        whatsappMessageId: messageId,
-        vendorPhone: normalizedPhone,
-        whatsappSessionInfo: 'Order dispatched via official WhatsApp Business Cloud API',
-        updatedAt: now,
-      });
-
-      // Update last successful message timestamp in settings
-      await saveRestaurantWhatsAppConfig(restaurantId, {
-        lastSuccessfulMessageAt: now,
-      });
+      await saveRestaurantWhatsAppConfig(
+        restaurantId,
+        {
+          lastSuccessfulMessageAt: now,
+        },
+        idToken
+      );
 
       await recordWhatsAppAuditLog({
         restaurantId,
@@ -526,6 +993,7 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
         action: 'PO_WHATSAPP_SENT',
         entityId: po.id,
         details: `Successfully dispatched PO #${po.poNumber} text order via WhatsApp Cloud API (Message ID: ${messageId}) to ${normalizedPhone}`,
+        idToken,
       });
     } catch (fsErr) {
       console.warn('Server-side Firestore writes note (client will also persist to Firestore):', fsErr);
@@ -551,24 +1019,29 @@ whatsappRouter.post('/send-po', async (req: Request, res: Response) => {
  */
 whatsappRouter.post('/test-message', async (req: Request, res: Response) => {
   try {
-    const { restaurantId, recipientPhone, userUid, userName, userRole } = req.body;
+    const idToken = extractBearerToken(req.headers.authorization);
+    const { restaurantId, recipientPhone, userUid, userName, userRole } = req.body || {};
 
     if (!restaurantId || !recipientPhone?.trim()) {
       return res.status(400).json({ error: 'restaurantId and recipientPhone are required' });
     }
 
-    const restDocRef = doc(db, 'restaurants', restaurantId);
-    const restSnap = await getDoc(restDocRef);
-    const restaurant = restSnap.data() as Restaurant | undefined;
+    const ownerCheck = await verifyRestaurantOwnerAccess({
+      restaurantId,
+      idToken,
+      fallbackUid: userUid,
+      fallbackRole: userRole,
+    });
 
-    const isOwner = userRole === 'OWNER' || (restaurant && restaurant.ownerUid === userUid);
-    if (!isOwner) {
+    if (!ownerCheck.authorized) {
       return res.status(403).json({
-        error: 'Forbidden: Only the restaurant Owner is authorized to send test WhatsApp messages.',
+        error:
+          ownerCheck.reason ||
+          'Forbidden: Only the restaurant Owner is authorized to send test WhatsApp messages.',
       });
     }
 
-    const config = await getRestaurantWhatsAppConfig(restaurantId);
+    const config = await getRestaurantWhatsAppConfig(restaurantId, idToken);
     if (!config || !config.connected) {
       return res.status(400).json({
         code: 'WHATSAPP_NOT_CONNECTED',
@@ -580,7 +1053,7 @@ whatsappRouter.post('/test-message', async (req: Request, res: Response) => {
     if (!token) {
       return res.status(400).json({
         code: 'WHATSAPP_AUTH_MISSING',
-        error: 'WhatsApp access token is missing on the server.',
+        error: 'WhatsApp access token is missing on the server. Click Reconnect to re-authorize.',
       });
     }
 
@@ -594,7 +1067,12 @@ whatsappRouter.post('/test-message', async (req: Request, res: Response) => {
       });
     }
 
-    const restaurantName = restaurant?.name || 'STOQO';
+    let restaurantName = 'STOQO';
+    if (idToken) {
+      const restDoc = await firestoreRestGetDoc(`restaurants/${restaurantId}`, idToken);
+      if (restDoc?.name) restaurantName = restDoc.name;
+    }
+
     const testBody = `✅ WhatsApp Business Connection Test\n\nRestaurant: ${restaurantName}\nStatus: Verified & Operational\nDispatched: ${new Date().toLocaleString('en-IN')}\n\nYour restaurant's official WhatsApp Business Platform integration is active and ready to transmit Purchase Orders.`;
 
     const metaResult = await sendMetaCloudApiMessage({
@@ -607,7 +1085,6 @@ whatsappRouter.post('/test-message', async (req: Request, res: Response) => {
     const now = new Date().toISOString();
     const messageId = metaResult.messageId;
 
-    // Save test record
     const messageRecord: WhatsAppMessageRecord = {
       id: messageId,
       restaurantId,
@@ -618,23 +1095,40 @@ whatsappRouter.post('/test-message', async (req: Request, res: Response) => {
       createdAt: now,
       sentAt: now,
       isTestMessage: true,
-      sentByUid: userUid,
+      sentByUid: ownerCheck.uid || userUid,
       sentByName: userName,
     };
 
-    const msgDocRef = doc(db, 'restaurants', restaurantId, 'whatsappMessages', messageId);
-    await setDoc(msgDocRef, messageRecord);
+    if (idToken) {
+      await firestoreRestPatchDoc(
+        `restaurants/${restaurantId}/whatsappMessages/${messageId}`,
+        messageRecord,
+        idToken
+      );
+    } else {
+      try {
+        const msgDocRef = doc(db, 'restaurants', restaurantId, 'whatsappMessages', messageId);
+        await setDoc(msgDocRef, messageRecord);
+      } catch {
+        // non-blocking
+      }
+    }
 
-    await saveRestaurantWhatsAppConfig(restaurantId, {
-      lastSuccessfulMessageAt: now,
-    });
+    await saveRestaurantWhatsAppConfig(
+      restaurantId,
+      {
+        lastSuccessfulMessageAt: now,
+      },
+      idToken
+    );
 
     await recordWhatsAppAuditLog({
       restaurantId,
-      actorUid: userUid || 'system',
+      actorUid: ownerCheck.uid || userUid || 'system',
       actorName: userName || 'Owner',
       action: 'WHATSAPP_TEST_MESSAGE_SENT',
       details: `Sent test message via WhatsApp Cloud API to ${normalizedPhone} (ID: ${messageId})`,
+      idToken,
     });
 
     return res.json({
@@ -688,15 +1182,14 @@ whatsappRouter.get('/history', async (req: Request, res: Response) => {
 /**
  * GET /api/whatsapp/webhook
  * Meta Webhook verification handshake
- * Query parameters: hub.mode, hub.verify_token, hub.challenge
  */
 whatsappRouter.get('/webhook', (req: Request, res: Response) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  // Canonical environment variable: WHATSAPP_VERIFY_TOKEN
-  const expectedToken = process.env.WHATSAPP_VERIFY_TOKEN;
+  const expectedToken =
+    process.env.WHATSAPP_VERIFY_TOKEN || process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN;
 
   if (!expectedToken) {
     console.warn('[WhatsApp Webhook] Verification failed: WHATSAPP_VERIFY_TOKEN is not configured in server environment');
@@ -715,11 +1208,11 @@ whatsappRouter.get('/webhook', (req: Request, res: Response) => {
 
 /**
  * POST /api/whatsapp/webhook
- * Meta Webhook status notifications (sent, delivered, read, failed)
+ * Meta Webhook status notifications (sent, delivered, read, failed) & coexistence/account events
  */
 whatsappRouter.post('/webhook', async (req: Request, res: Response) => {
   try {
-    const appSecret = process.env.WHATSAPP_APP_SECRET;
+    const appSecret = process.env.WHATSAPP_APP_SECRET || process.env.META_APP_SECRET;
     if (!appSecret) {
       console.warn('[WhatsApp Webhook] WHATSAPP_APP_SECRET is not configured on server');
       return res.status(500).json({
@@ -747,18 +1240,42 @@ whatsappRouter.post('/webhook', async (req: Request, res: Response) => {
 
     if (body?.object === 'whatsapp_business_account' && Array.isArray(body.entry)) {
       for (const entry of body.entry) {
-        const businessAccountId = entry.id; // WABA account ID
+        const businessAccountId = entry.id;
         if (!Array.isArray(entry.changes)) continue;
 
         for (const change of entry.changes) {
+          const field = change.field;
           const value = change.value;
-          if (!value || !Array.isArray(value.statuses)) continue;
+          const phoneNumberId = value?.metadata?.phone_number_id;
 
-          const phoneNumberId = value.metadata?.phone_number_id;
+          // Handle WhatsApp Business App Coexistence / Account Update / History webhook events
+          if (
+            field === 'smb_message_echoes' ||
+            field === 'smb_app_state_sync' ||
+            field === 'history' ||
+            field === 'account_update'
+          ) {
+            const restaurantId = await resolveRestaurantForMetaEvent({
+              phoneNumberId,
+              businessAccountId,
+            });
+            if (restaurantId) {
+              const now = new Date().toISOString();
+              await saveRestaurantWhatsAppConfig(restaurantId, {
+                lastWebhookAt: now,
+                ...(field === 'smb_message_echoes' || field === 'smb_app_state_sync'
+                  ? { coexistenceMode: true }
+                  : {}),
+              });
+            }
+            continue;
+          }
+
+          if (!value || !Array.isArray(value.statuses)) continue;
 
           for (const statusObj of value.statuses) {
             const messageId = statusObj.id;
-            const rawStatus = (statusObj.status || '').toLowerCase(); // 'sent' | 'delivered' | 'read' | 'failed'
+            const rawStatus = (statusObj.status || '').toLowerCase();
 
             if (!messageId || !['sent', 'delivered', 'read', 'failed'].includes(rawStatus)) {
               continue;
@@ -768,7 +1285,6 @@ whatsappRouter.post('/webhook', async (req: Request, res: Response) => {
               ? new Date(Number(statusObj.timestamp) * 1000).toISOString()
               : new Date().toISOString();
 
-            // Multi-tenant safe restaurant resolution
             const restaurantId = await resolveRestaurantForMetaEvent({
               phoneNumberId,
               businessAccountId,
@@ -817,7 +1333,6 @@ whatsappRouter.post('/webhook', async (req: Request, res: Response) => {
 
               await updateDoc(msgRef, updatePayload);
 
-              // Update associated purchase order if linked
               if (currentData.purchaseOrderId) {
                 const poRef = doc(
                   db,
@@ -840,7 +1355,6 @@ whatsappRouter.post('/webhook', async (req: Request, res: Response) => {
                 }
               }
 
-              // Update restaurant settings lastWebhookAt
               await saveRestaurantWhatsAppConfig(restaurantId, {
                 lastWebhookAt: timestamp,
               });
@@ -854,7 +1368,6 @@ whatsappRouter.post('/webhook', async (req: Request, res: Response) => {
                 details: `WhatsApp message ${messageId} delivery status transitioned to ${rawStatus.toUpperCase()}`,
               });
             } else {
-              // Create record if it does not exist yet with all required safe fields
               const newRecord: WhatsAppMessageRecord = {
                 id: messageId,
                 restaurantId,

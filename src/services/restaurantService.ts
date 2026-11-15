@@ -1186,6 +1186,7 @@ export async function updateVendorContact(
 export async function createPurchaseOrder(
   restaurantId: string,
   poData: {
+    poNumber?: string;
     vendorId: string;
     vendorName: string;
     vendorPhone?: string;
@@ -1208,7 +1209,7 @@ export async function createPurchaseOrder(
 
   const po: PurchaseOrder = {
     id: poRef.id,
-    poNumber: `PO-${Date.now().toString().slice(-6)}`,
+    poNumber: poData.poNumber || `PO-${Date.now().toString().slice(-6)}`,
     vendorId: poData.vendorId,
     vendorName: poData.vendorName,
     vendorPhone: poData.vendorPhone || '',

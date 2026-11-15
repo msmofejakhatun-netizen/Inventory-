@@ -93,6 +93,7 @@ export const StockView: React.FC = () => {
 
   // Result Feedback Banner
   const [deleteNotice, setDeleteNotice] = useState<DeleteFeedbackNotice | null>(null);
+  const [saveSuccessNotice, setSaveSuccessNotice] = useState<string | null>(null);
 
   // Form fields
   const [name, setName] = useState('');
@@ -100,6 +101,8 @@ export const StockView: React.FC = () => {
   const [unit, setUnit] = useState('Kg');
   const [departmentId, setDepartmentId] = useState('');
   const [primaryVendorId, setPrimaryVendorId] = useState('');
+  const [currentItemRateInput, setCurrentItemRateInput] = useState<string>('0');
+  const [itemFormError, setItemFormError] = useState<string | null>(null);
   const [minimumStock, setMinimumStock] = useState(5);
   const [maximumStock, setMaximumStock] = useState(25);
   const [targetStockDays, setTargetStockDays] = useState(5);
@@ -114,11 +117,23 @@ export const StockView: React.FC = () => {
 
   const currencySymbol = activeRestaurant?.currencySymbol || '₹';
 
+  const getEffectiveCurrentRate = (item: Item): number => {
+    if (
+      item.currentItemRate !== undefined &&
+      item.currentItemRate !== null &&
+      !Number.isNaN(Number(item.currentItemRate))
+    ) {
+      return Math.max(0, Number(item.currentItemRate));
+    }
+    return Math.max(0, Number(item.lastPurchaseRate || item.averageStockRate || 0));
+  };
+
   // Reset selection and notice when switching restaurants
   useEffect(() => {
     setSelectedItemIds(new Set());
     setOpenMenu(null);
     setDeleteNotice(null);
+    setSaveSuccessNotice(null);
   }, [activeRestaurantId]);
 
   useEffect(() => {
@@ -319,6 +334,8 @@ export const StockView: React.FC = () => {
     setUnit('Kg');
     setDepartmentId(departments[0]?.id || '');
     setPrimaryVendorId(vendors[0]?.id || '');
+    setCurrentItemRateInput('0');
+    setItemFormError(null);
     setMinimumStock(5);
     setMaximumStock(25);
     setTargetStockDays(5);
@@ -335,6 +352,8 @@ export const StockView: React.FC = () => {
     setUnit(item.unit);
     setDepartmentId(item.departmentId || '');
     setPrimaryVendorId(item.primaryVendorId || '');
+    setCurrentItemRateInput(getEffectiveCurrentRate(item).toFixed(2));
+    setItemFormError(null);
     setMinimumStock(item.minimumStock || 0);
     setMaximumStock(item.maximumStock || 0);
     setTargetStockDays(item.targetStockDays || 5);
@@ -347,54 +366,92 @@ export const StockView: React.FC = () => {
   const handleSaveItem = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeRestaurantId || !name.trim()) return;
+    setItemFormError(null);
 
     const deptObj = departments.find((d) => d.id === departmentId);
     const vendorObj = vendors.find((v) => v.id === primaryVendorId);
     const now = new Date().toISOString();
 
     if (editingItem) {
-      const itemRef = doc(db, 'restaurants', activeRestaurantId, 'items', editingItem.id);
-      await updateDoc(itemRef, {
-        name: name.trim(),
-        category,
-        unit,
-        departmentId: departmentId || '',
-        departmentName: deptObj?.name || '',
-        primaryVendorId: primaryVendorId || '',
-        primaryVendorName: vendorObj?.name || '',
-        minimumStock: Number(minimumStock),
-        maximumStock: Number(maximumStock),
-        targetStockDays: Number(targetStockDays),
-        taxPercent: Number(taxPercent),
-        updatedAt: now,
-      });
-    } else {
-      const itemRef = doc(collection(db, 'restaurants', activeRestaurantId, 'items'));
-      const newItem: Item = {
-        id: itemRef.id,
-        name: name.trim(),
-        category,
-        unit,
-        departmentId: departmentId || '',
-        departmentName: deptObj?.name || '',
-        primaryVendorId: primaryVendorId || '',
-        primaryVendorName: vendorObj?.name || '',
-        currentStock: Number(openingStock),
-        minimumStock: Number(minimumStock),
-        maximumStock: Number(maximumStock),
-        targetStockDays: Number(targetStockDays),
-        lastPurchaseRate: Number(openingRate),
-        averageStockRate: Number(openingRate),
-        taxPercent: Number(taxPercent),
-        reorderLevel: Number(minimumStock),
-        status: 'active',
-        restaurantId: activeRestaurantId,
-        updatedAt: now,
-      };
-      await setDoc(itemRef, newItem);
-    }
+      if (!canManageInventory) {
+        setItemFormError('Permission denied: Only Owner or authorized Manager can edit item master details and rates.');
+        return;
+      }
 
-    setIsItemModalOpen(false);
+      const trimmedRate = String(currentItemRateInput).trim();
+      const parsedRate = trimmedRate === '' ? NaN : Number(trimmedRate);
+      if (!Number.isFinite(parsedRate) || parsedRate < 0) {
+        setItemFormError('Please enter a valid Current Item Rate (0 or greater). Negative values are not allowed.');
+        return;
+      }
+
+      const roundedCurrentRate = Number(parsedRate.toFixed(2));
+
+      try {
+        const itemRef = doc(db, 'restaurants', activeRestaurantId, 'items', editingItem.id);
+        // Save updated item master fields and currentItemRate ONLY (never directly alter WAC averageStockRate, lastPurchaseRate, or currentStock)
+        await updateDoc(itemRef, {
+          name: name.trim(),
+          category,
+          unit,
+          departmentId: departmentId || '',
+          departmentName: deptObj?.name || '',
+          primaryVendorId: primaryVendorId || '',
+          primaryVendorName: vendorObj?.name || '',
+          currentItemRate: roundedCurrentRate,
+          minimumStock: Number(minimumStock),
+          maximumStock: Number(maximumStock),
+          targetStockDays: Number(targetStockDays),
+          taxPercent: Number(taxPercent),
+          updatedAt: now,
+        });
+
+        setSaveSuccessNotice(
+          `Saved changes for "${name.trim()}". Current Item Rate updated to ${currencySymbol}${roundedCurrentRate.toFixed(2)} / ${unit}.`
+        );
+        setIsItemModalOpen(false);
+      } catch (err: any) {
+        setItemFormError(err?.message || 'Unable to save item changes. Please check your permissions and try again.');
+      }
+    } else {
+      const parsedOpeningRate = Number(openingRate);
+      if (!Number.isFinite(parsedOpeningRate) || parsedOpeningRate < 0) {
+        setItemFormError('Opening rate cannot be negative.');
+        return;
+      }
+      const roundedOpeningRate = Number(parsedOpeningRate.toFixed(2));
+
+      try {
+        const itemRef = doc(collection(db, 'restaurants', activeRestaurantId, 'items'));
+        const newItem: Item = {
+          id: itemRef.id,
+          name: name.trim(),
+          category,
+          unit,
+          departmentId: departmentId || '',
+          departmentName: deptObj?.name || '',
+          primaryVendorId: primaryVendorId || '',
+          primaryVendorName: vendorObj?.name || '',
+          currentStock: Number(openingStock),
+          minimumStock: Number(minimumStock),
+          maximumStock: Number(maximumStock),
+          targetStockDays: Number(targetStockDays),
+          currentItemRate: roundedOpeningRate,
+          lastPurchaseRate: roundedOpeningRate,
+          averageStockRate: roundedOpeningRate,
+          taxPercent: Number(taxPercent),
+          reorderLevel: Number(minimumStock),
+          status: 'active',
+          restaurantId: activeRestaurantId,
+          updatedAt: now,
+        };
+        await setDoc(itemRef, newItem);
+        setSaveSuccessNotice(`Created item "${name.trim()}" (${currencySymbol}${roundedOpeningRate.toFixed(2)} / ${unit}).`);
+        setIsItemModalOpen(false);
+      } catch (err: any) {
+        setItemFormError(err?.message || 'Unable to create item. Please try again.');
+      }
+    }
   };
 
   // Individual Item Delete Handler
@@ -686,6 +743,27 @@ export const StockView: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Item Save Success Notification Banner */}
+      {saveSuccessNotice && (
+        <div
+          id="item-save-success-banner"
+          className="rounded-xl border bg-emerald-50 border-emerald-200 text-emerald-900 p-3.5 flex items-center justify-between gap-3 text-xs"
+        >
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span className="font-semibold">{saveSuccessNotice}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSaveSuccessNotice(null)}
+            className="p-1 rounded hover:bg-emerald-100/70 text-emerald-800 shrink-0"
+            aria-label="Dismiss save notice"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Delete / Archive Feedback Notification Banner */}
       {deleteNotice && (
@@ -1184,77 +1262,101 @@ export const StockView: React.FC = () => {
         subtitle="Inventory Master Specification"
         maxWidth="md"
       >
-        {viewingItem && (
-          <div className="space-y-4 text-xs">
-            <div className="grid grid-cols-2 gap-3 p-3.5 rounded-xl bg-stone-50 border border-stone-200">
-              <div>
-                <span className="text-[10px] uppercase font-semibold text-stone-400 block">Item Name</span>
-                <p className="font-bold text-stone-900 mt-0.5">{viewingItem.name}</p>
+        {viewingItem && (() => {
+          const liveViewingItem = processedItems.find((i) => i.id === viewingItem.id) || viewingItem;
+          const effectiveRate = getEffectiveCurrentRate(liveViewingItem);
+          const hasPreviousPurchaseRate = Number(liveViewingItem.lastPurchaseRate) > 0;
+          return (
+            <div className="space-y-4 text-xs">
+              <div className="grid grid-cols-2 gap-3 p-3.5 rounded-xl bg-stone-50 border border-stone-200">
+                <div>
+                  <span className="text-[10px] uppercase font-semibold text-stone-400 block">Item Name</span>
+                  <p className="font-bold text-stone-900 mt-0.5">{liveViewingItem.name}</p>
+                </div>
+                <div>
+                  <span className="text-[10px] uppercase font-semibold text-stone-400 block">Category</span>
+                  <p className="font-semibold text-stone-800 mt-0.5">{liveViewingItem.category}</p>
+                </div>
+                <div>
+                  <span className="text-[10px] uppercase font-semibold text-stone-400 block">Department</span>
+                  <p className="text-stone-700 mt-0.5">{liveViewingItem.departmentName || 'General Store'}</p>
+                </div>
+                <div>
+                  <span className="text-[10px] uppercase font-semibold text-stone-400 block">Primary Vendor</span>
+                  <p className="text-stone-700 mt-0.5">{liveViewingItem.primaryVendorName || 'Not assigned'}</p>
+                </div>
+                <div className="col-span-2 p-2.5 rounded-lg bg-white border border-stone-200 flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <span className="text-[10px] uppercase font-bold text-stone-500 block">
+                      Current Item Rate ({currencySymbol})
+                    </span>
+                    <p className="text-sm font-bold text-stone-900 mt-0.5 font-mono">
+                      {currencySymbol}
+                      {effectiveRate.toFixed(2)} / {liveViewingItem.unit}
+                    </p>
+                  </div>
+                  {hasPreviousPurchaseRate && (
+                    <div className="text-right">
+                      <span className="text-[11px] font-semibold text-stone-600 bg-stone-100 px-2.5 py-1 rounded-md border border-stone-200 inline-block">
+                        Last Purchase Rate: {currencySymbol}
+                        {Number(liveViewingItem.lastPurchaseRate).toFixed(2)}
+                      </span>
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <span className="text-[10px] uppercase font-semibold text-stone-400 block">Current Stock</span>
+                  <p className="font-bold text-stone-900 mt-0.5">
+                    {liveViewingItem.currentStock} {liveViewingItem.unit}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-[10px] uppercase font-semibold text-stone-400 block">Avg Rate (WAC)</span>
+                  <p className="font-semibold text-stone-800 mt-0.5">
+                    {currencySymbol}
+                    {(liveViewingItem.averageStockRate || liveViewingItem.lastPurchaseRate || 0).toFixed(2)} / {liveViewingItem.unit}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-[10px] uppercase font-semibold text-stone-400 block">Stock Value</span>
+                  <p className="font-bold text-stone-900 mt-0.5">
+                    {currencySymbol}
+                    {liveViewingItem.stockValue.toFixed(2)}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-[10px] uppercase font-semibold text-stone-400 block">Min / Max / Target Days</span>
+                  <p className="text-stone-700 mt-0.5">
+                    {liveViewingItem.minimumStock} / {liveViewingItem.maximumStock} {liveViewingItem.unit} • {liveViewingItem.targetStockDays}d
+                  </p>
+                </div>
               </div>
-              <div>
-                <span className="text-[10px] uppercase font-semibold text-stone-400 block">Category</span>
-                <p className="font-semibold text-stone-800 mt-0.5">{viewingItem.category}</p>
-              </div>
-              <div>
-                <span className="text-[10px] uppercase font-semibold text-stone-400 block">Department</span>
-                <p className="text-stone-700 mt-0.5">{viewingItem.departmentName || 'General Store'}</p>
-              </div>
-              <div>
-                <span className="text-[10px] uppercase font-semibold text-stone-400 block">Primary Vendor</span>
-                <p className="text-stone-700 mt-0.5">{viewingItem.primaryVendorName || 'Not assigned'}</p>
-              </div>
-              <div>
-                <span className="text-[10px] uppercase font-semibold text-stone-400 block">Current Stock</span>
-                <p className="font-bold text-stone-900 mt-0.5">
-                  {viewingItem.currentStock} {viewingItem.unit}
-                </p>
-              </div>
-              <div>
-                <span className="text-[10px] uppercase font-semibold text-stone-400 block">Avg Rate (WAC)</span>
-                <p className="font-semibold text-stone-800 mt-0.5">
-                  {currencySymbol}
-                  {(viewingItem.averageStockRate || viewingItem.lastPurchaseRate || 0).toFixed(2)} / {viewingItem.unit}
-                </p>
-              </div>
-              <div>
-                <span className="text-[10px] uppercase font-semibold text-stone-400 block">Stock Value</span>
-                <p className="font-bold text-stone-900 mt-0.5">
-                  {currencySymbol}
-                  {viewingItem.stockValue.toFixed(2)}
-                </p>
-              </div>
-              <div>
-                <span className="text-[10px] uppercase font-semibold text-stone-400 block">Min / Max / Target Days</span>
-                <p className="text-stone-700 mt-0.5">
-                  {viewingItem.minimumStock} / {viewingItem.maximumStock} {viewingItem.unit} • {viewingItem.targetStockDays}d
-                </p>
-              </div>
-            </div>
 
-            <div className="flex justify-end gap-2">
-              {canManageInventory && (
+              <div className="flex justify-end gap-2">
+                {canManageInventory && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const target = liveViewingItem;
+                      setViewingItem(null);
+                      openEditModal(target);
+                    }}
+                    className="px-4 py-2 border border-stone-200 hover:bg-stone-50 text-stone-700 rounded-lg font-semibold"
+                  >
+                    Edit Item
+                  </button>
+                )}
                 <button
                   type="button"
-                  onClick={() => {
-                    const target = viewingItem;
-                    setViewingItem(null);
-                    openEditModal(target);
-                  }}
-                  className="px-4 py-2 border border-stone-200 hover:bg-stone-50 text-stone-700 rounded-lg font-semibold"
+                  onClick={() => setViewingItem(null)}
+                  className="px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white rounded-lg font-semibold"
                 >
-                  Edit Item
+                  Close
                 </button>
-              )}
-              <button
-                type="button"
-                onClick={() => setViewingItem(null)}
-                className="px-4 py-2 bg-stone-900 hover:bg-stone-800 text-white rounded-lg font-semibold"
-              >
-                Close
-              </button>
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
       </Modal>
 
       {/* Individual Delete Confirmation Modal */}
@@ -1481,6 +1583,70 @@ export const StockView: React.FC = () => {
               </select>
             </div>
           </div>
+
+          {editingItem && (
+            <div className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 space-y-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
+                <div>
+                  <label
+                    htmlFor="current-item-rate-input"
+                    className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1"
+                  >
+                    CURRENT ITEM RATE ({currencySymbol})
+                  </label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-2 text-xs font-bold text-stone-500 select-none">
+                      {currencySymbol}
+                    </span>
+                    <input
+                      id="current-item-rate-input"
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      required
+                      disabled={!canManageInventory}
+                      placeholder={`${currencySymbol}140.00`}
+                      value={currentItemRateInput}
+                      onChange={(e) => {
+                        setCurrentItemRateInput(e.target.value);
+                        if (itemFormError) setItemFormError(null);
+                      }}
+                      className="w-full pl-7 pr-12 py-2 text-xs font-mono font-bold text-stone-900 border border-stone-300 rounded-lg bg-white focus:outline-none focus:border-amber-500 disabled:bg-stone-100 disabled:text-stone-500"
+                    />
+                    <span className="absolute right-3 top-2 text-[11px] text-stone-400 font-medium select-none">
+                      / {unit}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex flex-col sm:items-end justify-center gap-1 text-xs">
+                  {Number(editingItem.lastPurchaseRate) > 0 && (
+                    <span
+                      id="edit-item-last-purchase-rate"
+                      className="px-2.5 py-1 rounded-md bg-white border border-stone-200 font-semibold text-stone-700"
+                    >
+                      Last Purchase Rate: {currencySymbol}
+                      {Number(editingItem.lastPurchaseRate).toFixed(2)}
+                    </span>
+                  )}
+                  <span className="text-[11px] text-stone-500">
+                    Current WAC: {currencySymbol}
+                    {Number(editingItem.averageStockRate || 0).toFixed(2)} / {unit} (protected)
+                  </span>
+                </div>
+              </div>
+              <p className="text-[11px] text-stone-500 leading-relaxed">
+                Used as the default estimated rate for new Purchase Orders. Updating this rate does not modify existing stock valuation, Weighted Average Cost (WAC), or historical invoices.
+              </p>
+            </div>
+          )}
+
+          {itemFormError && (
+            <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800 font-medium flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>{itemFormError}</span>
+            </div>
+          )}
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>

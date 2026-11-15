@@ -205,10 +205,19 @@ service cloud.firestore {
       // Items Master
       match /items/{itemId} {
         allow get, list: if isMemberOfRestaurant(restaurantId);
-        allow create: if isStorekeeper(restaurantId);
-        allow update: if isRestaurantManager(restaurantId) || (
-          isStorekeeper(restaurantId) &&
-          request.resource.data.get('status', 'active') == resource.data.get('status', 'active')
+        allow create: if isStorekeeper(restaurantId) && (
+          !('currentItemRate' in request.resource.data) ||
+          (request.resource.data.currentItemRate is number && request.resource.data.currentItemRate >= 0)
+        );
+        allow update: if (
+          !('currentItemRate' in request.resource.data) ||
+          (request.resource.data.currentItemRate is number && request.resource.data.currentItemRate >= 0)
+        ) && (
+          isRestaurantManager(restaurantId) || (
+            isStorekeeper(restaurantId) &&
+            request.resource.data.get('status', 'active') == resource.data.get('status', 'active') &&
+            request.resource.data.get('currentItemRate', null) == resource.data.get('currentItemRate', null)
+          )
         );
         allow delete: if isRestaurantManager(restaurantId);
       }
@@ -302,7 +311,9 @@ service cloud.firestore {
       // Settings (e.g. POS integration configuration, WhatsApp)
       match /settings/whatsapp {
         allow get, list: if isMemberOfRestaurant(restaurantId);
-        allow create, update, delete: if isRestaurantOwner(restaurantId);
+        allow create, update: if isRestaurantOwner(restaurantId) &&
+                              !request.resource.data.keys().hasAny(['accessToken', 'appSecret']);
+        allow delete: if isRestaurantOwner(restaurantId);
       }
 
       match /settings/{settingId} {

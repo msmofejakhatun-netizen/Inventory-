@@ -50,6 +50,7 @@ import {
 import { exportPurchaseOrderPdf } from '../services/exportService';
 import { sendPoViaWhatsAppApi, fetchWhatsAppStatus } from '../services/whatsappClient';
 import { WhatsAppPoHistory } from '../components/whatsapp/WhatsAppPoHistory';
+import { SmartSupplierPoWorkspace } from '../components/purchaseOrders/SmartSupplierPoWorkspace';
 import { Modal } from '../components/common/Modal';
 import { Badge } from '../components/common/Badge';
 
@@ -124,19 +125,8 @@ export const PurchaseOrdersView: React.FC = () => {
   const [whatsAppConnected, setWhatsAppConnected] = useState<boolean>(false);
   const [whatsAppNumber, setWhatsAppNumber] = useState<string>('');
 
-  // Create PO Modal
+  // Full-Screen Smart Supplier-Wise PO Workspace state
   const [isCreateOpen, setIsCreateOpen] = useState(false);
-  const [selectedVendorId, setSelectedVendorId] = useState('');
-  const [createPoItems, setCreatePoItems] = useState<{
-    itemId: string;
-    itemName: string;
-    unit: string;
-    orderedQty: number;
-    estimatedRate: number;
-    estimatedAmount: number;
-    reason: string;
-  }[]>([]);
-  const [createSubmitting, setCreateSubmitting] = useState(false);
 
   // Vendor Phone Quick Update Modal
   const [phoneModal, setPhoneModal] = useState<{
@@ -252,80 +242,10 @@ export const PurchaseOrdersView: React.FC = () => {
   }, [activeRestaurantId]);
 
   // -------------------------------------------------------------------------
-  // CREATE PO WORKFLOW
+  // CREATE PO WORKFLOW (FULL-SCREEN SMART SUPPLIER-WISE WORKSPACE)
   // -------------------------------------------------------------------------
   const openCreateModal = () => {
-    const firstVendor = vendors[0];
-    setSelectedVendorId(firstVendor?.id || '');
-    populateVendorItems(firstVendor?.id || '');
     setIsCreateOpen(true);
-  };
-
-  const populateVendorItems = (vId: string) => {
-    const matching = items.filter((i) => !vId || i.primaryVendorId === vId);
-    const candidateItems = matching.length > 0 ? matching : items.slice(0, 6);
-
-    const rows = candidateItems.map((item) => {
-      const rate = item.averageStockRate || item.lastPurchaseRate || 0;
-      const target = item.maximumStock || item.minimumStock * 2 || 10;
-      const needed = Math.max(0, target - item.currentStock);
-      const qty = needed > 0 ? needed : 5;
-      return {
-        itemId: item.id,
-        itemName: item.name,
-        unit: item.unit,
-        orderedQty: qty,
-        estimatedRate: rate,
-        estimatedAmount: Number((qty * rate).toFixed(2)),
-        reason: 'Restocking required',
-      };
-    });
-    setCreatePoItems(rows);
-  };
-
-  const handleCreateVendorChange = (vId: string) => {
-    setSelectedVendorId(vId);
-    populateVendorItems(vId);
-  };
-
-  const updateCreateItemQty = (idx: number, qty: number) => {
-    const updated = [...createPoItems];
-    const item = updated[idx];
-    item.orderedQty = Math.max(0, Number(qty) || 0);
-    item.estimatedAmount = Number((item.orderedQty * item.estimatedRate).toFixed(2));
-    updated[idx] = item;
-    setCreatePoItems(updated);
-  };
-
-  const removeCreateItemRow = (idx: number) => {
-    if (createPoItems.length > 1) {
-      setCreatePoItems(createPoItems.filter((_, i) => i !== idx));
-    }
-  };
-
-  const createTotalEstimated = createPoItems.reduce((sum, i) => sum + i.estimatedAmount, 0);
-
-  const handleSavePo = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!activeRestaurantId || !selectedVendorId || createPoItems.length === 0) return;
-
-    const vendor = vendors.find((v) => v.id === selectedVendorId);
-    try {
-      setCreateSubmitting(true);
-      await createPurchaseOrder(activeRestaurantId, {
-        vendorId: selectedVendorId,
-        vendorName: vendor?.name || 'Vendor',
-        vendorPhone: vendor?.phone || vendor?.mobile || '',
-        items: createPoItems,
-        actorUid: user?.uid || 'system',
-        actorName: userProfile?.name || 'Authorized User',
-      });
-      setIsCreateOpen(false);
-    } catch (err) {
-      console.error('Failed to create purchase order:', err);
-    } finally {
-      setCreateSubmitting(false);
-    }
   };
 
   // -------------------------------------------------------------------------
@@ -1214,112 +1134,28 @@ Please confirm receipt and delivery schedule.`;
       </div>
 
       {/* ------------------------------------------------------------------- */}
-      {/* MODAL 1: CREATE PURCHASE ORDER                                      */}
+      {/* FULL-SCREEN SMART SUPPLIER-WISE PURCHASE ORDER WORKSPACE            */}
       {/* ------------------------------------------------------------------- */}
-      <Modal
-        isOpen={isCreateOpen}
-        onClose={() => setIsCreateOpen(false)}
-        title="Create Supplier Purchase Order"
-        subtitle="Consolidate items and prepare supplier procurement order"
-        maxWidth="2xl"
-      >
-        <form onSubmit={handleSavePo} className="space-y-4">
-          <div>
-            <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1">
-              Select Supplier / Vendor *
-            </label>
-            <select
-              required
-              value={selectedVendorId}
-              onChange={(e) => handleCreateVendorChange(e.target.value)}
-              className="w-full px-3 py-2 text-xs border border-stone-300 rounded-lg bg-white focus:outline-none focus:border-amber-500"
-            >
-              {vendors.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.name} {v.phone ? `(${v.phone})` : '(No phone)'}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="border border-stone-200 rounded-xl overflow-hidden">
-            <div className="p-3 bg-stone-50 border-b border-stone-200 flex justify-between items-center">
-              <h4 className="text-xs font-bold text-stone-800 uppercase tracking-wider">
-                Order Items ({createPoItems.length})
-              </h4>
-              <span className="text-[11px] text-stone-500">
-                Stock replenishment requirements
-              </span>
-            </div>
-
-            <div className="p-3 space-y-2 max-h-72 overflow-y-auto divide-y divide-stone-100">
-              {createPoItems.map((item, idx) => (
-                <div
-                  key={idx}
-                  className="pt-2 first:pt-0 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
-                >
-                  <div className="flex-1">
-                    <p className="font-semibold text-stone-900">{item.itemName}</p>
-                    <p className="text-[10px] text-stone-400">
-                      Rate: {currencySymbol}
-                      {item.estimatedRate.toFixed(2)} / {item.unit}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <label className="text-[10px] text-stone-500 sm:hidden">Qty:</label>
-                    <input
-                      type="number"
-                      min={0.1}
-                      step="any"
-                      value={item.orderedQty}
-                      onChange={(e) => updateCreateItemQty(idx, Number(e.target.value))}
-                      className="w-20 px-2 py-1 text-xs border border-stone-300 rounded-md text-right font-bold focus:outline-none focus:border-amber-500"
-                    />
-                    <span className="text-stone-500 w-10">{item.unit}</span>
-                    <span className="font-bold text-stone-900 w-24 text-right font-mono">
-                      {currencySymbol}
-                      {item.estimatedAmount.toFixed(2)}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => removeCreateItemRow(idx)}
-                      className="p-1 text-stone-400 hover:text-rose-600 rounded"
-                      title="Remove row"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="p-3 bg-stone-50 border-t border-stone-200 flex justify-between items-center text-xs">
-              <span className="font-bold text-stone-700">Estimated Total:</span>
-              <span className="text-sm font-black text-stone-900 font-mono">
-                {currencySymbol}
-                {createTotalEstimated.toFixed(2)}
-              </span>
-            </div>
-          </div>
-
-          <div className="pt-3 flex justify-end gap-2 border-t border-stone-100">
-            <button
-              type="button"
-              onClick={() => setIsCreateOpen(false)}
-              className="px-4 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-lg"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={createSubmitting}
-              className="px-5 py-2 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold rounded-lg shadow-xs disabled:opacity-50 transition-colors"
-            >
-              {createSubmitting ? 'Saving...' : 'Save as Draft PO'}
-            </button>
-          </div>
-        </form>
-      </Modal>
+      {activeRestaurantId && (
+        <SmartSupplierPoWorkspace
+          isOpen={isCreateOpen}
+          onClose={() => setIsCreateOpen(false)}
+          restaurantId={activeRestaurantId}
+          restaurantName={activeRestaurant?.name || 'STOQO Restaurant'}
+          currencySymbol={currencySymbol}
+          items={items}
+          vendors={vendors}
+          userUid={user?.uid || 'system'}
+          userName={userProfile?.name || user?.displayName || 'Authorized User'}
+          userRole={activeRole}
+          whatsAppConnected={whatsAppConnected}
+          onOrderSentOrUpdated={() => {
+            if (statusFilter === 'DRAFT') {
+              setStatusFilter('ALL');
+            }
+          }}
+        />
+      )}
 
       {/* ------------------------------------------------------------------- */}
       {/* MODAL 2: VENDOR PHONE CONFIGURATION                                 */}

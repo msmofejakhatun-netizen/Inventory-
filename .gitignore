@@ -6,3 +6,4 @@ coverage/
 *.log
 .env*
 !.env.example
+.stoqo-wa-vault.enc
