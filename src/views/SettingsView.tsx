@@ -17,6 +17,8 @@ import {
   XCircle,
   Mail,
   Edit2,
+  User as UserIcon,
+  Phone,
 } from 'lucide-react';
 import {
   collection,
@@ -32,18 +34,25 @@ import { Department, RestaurantUser, UserRole, StaffAuthorization } from '../typ
 import {
   addActiveTeamMember,
   updateTeamMember,
+  updateTeamMemberName,
   removeTeamMember,
 } from '../services/restaurantService';
 import { Modal } from '../components/common/Modal';
 import { Badge } from '../components/common/Badge';
 import { WhatsAppSettingsCard } from '../components/whatsapp/WhatsAppSettingsCard';
 import { PWAInstallCard } from '../components/pwa/PWAInstallCard';
+import {
+  PROFILE_NAME_MAX_LENGTH,
+  PROFILE_NAME_MIN_LENGTH,
+  validateDisplayName,
+} from '../utils/profileValidation';
 
 export interface DisplayMember {
   id: string;
   uid?: string;
   authorizationId?: string;
   name: string;
+  nameUpdatedAt?: string;
   email: string;
   role: UserRole;
   departmentId: string | null;
@@ -53,7 +62,14 @@ export interface DisplayMember {
 }
 
 export const SettingsView: React.FC = () => {
-  const { activeRestaurant, activeRestaurantId, user, userProfile, hasRole, activeRole } = useAuth();
+  const { activeRestaurant, activeRestaurantId, user, userProfile, hasRole, activeRole, updateOwnProfileName } = useAuth();
+
+  // My Profile (Owner / Staff Self Display Name)
+  const [isEditingOwnName, setIsEditingOwnName] = useState(false);
+  const [ownNameInput, setOwnNameInput] = useState(userProfile?.name || user?.displayName || '');
+  const [ownNameSaving, setOwnNameSaving] = useState(false);
+  const [ownNameError, setOwnNameError] = useState<string | null>(null);
+  const [ownNameSuccess, setOwnNameSuccess] = useState<string | null>(null);
 
   // General Settings Form
   const [name, setName] = useState(activeRestaurant?.name || '');
@@ -85,13 +101,27 @@ export const SettingsView: React.FC = () => {
   const [memberSuccess, setMemberSuccess] = useState<string | null>(null);
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
 
-  // Edit Member Modal
+  // Edit Member Role & Department Modal
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [editingMember, setEditingMember] = useState<DisplayMember | null>(null);
   const [editRole, setEditRole] = useState<UserRole>('DEPARTMENT_STAFF');
   const [editDeptId, setEditDeptId] = useState('');
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
+
+  // Edit Team Member Display Name Modal
+  const [isEditNameModalOpen, setIsEditNameModalOpen] = useState(false);
+  const [renamingMember, setRenamingMember] = useState<DisplayMember | null>(null);
+  const [renameInput, setRenameInput] = useState('');
+  const [renameSaving, setRenameSaving] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [teamBanner, setTeamBanner] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  useEffect(() => {
+    if (!isEditingOwnName) {
+      setOwnNameInput(userProfile?.name || user?.displayName || '');
+    }
+  }, [userProfile?.name, user?.displayName, isEditingOwnName]);
 
   useEffect(() => {
     if (activeRestaurant) {
@@ -136,6 +166,7 @@ export const SettingsView: React.FC = () => {
         uid: u.uid,
         authorizationId: u.authorizationId,
         name: u.name || 'Staff Member',
+        nameUpdatedAt: u.nameUpdatedAt,
         email: u.email || u.uid,
         role: u.role,
         departmentId: u.departmentId || null,
@@ -158,6 +189,7 @@ export const SettingsView: React.FC = () => {
           uid: a.attachedUid,
           authorizationId: a.id,
           name: a.fullName,
+          nameUpdatedAt: a.nameUpdatedAt,
           email: a.email,
           role: a.role,
           departmentId: a.departmentId || null,
@@ -168,6 +200,10 @@ export const SettingsView: React.FC = () => {
       } else {
         if (!existing.authorizationId) {
           existing.authorizationId = a.id;
+        }
+        if (a.nameUpdatedAt && (!existing.nameUpdatedAt || a.nameUpdatedAt > existing.nameUpdatedAt)) {
+          existing.name = a.fullName;
+          existing.nameUpdatedAt = a.nameUpdatedAt;
         }
         if (isAuthActive) {
           existing.status = 'ACTIVE';
@@ -310,6 +346,125 @@ export const SettingsView: React.FC = () => {
     }
   };
 
+  const handleStartEditOwnName = () => {
+    setOwnNameInput(userProfile?.name || user?.displayName || '');
+    setOwnNameError(null);
+    setOwnNameSuccess(null);
+    setIsEditingOwnName(true);
+  };
+
+  const handleCancelEditOwnName = () => {
+    setOwnNameInput(userProfile?.name || user?.displayName || '');
+    setOwnNameError(null);
+    setIsEditingOwnName(false);
+  };
+
+  const handleSaveOwnName = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setOwnNameError(null);
+    setOwnNameSuccess(null);
+
+    const validation = validateDisplayName(ownNameInput);
+    if (!validation.valid) {
+      setOwnNameError(validation.error || 'Please enter a valid display name.');
+      return;
+    }
+
+    setOwnNameSaving(true);
+    try {
+      const res = await updateOwnProfileName(validation.normalized);
+      if (!res.success) {
+        setOwnNameError(res.error || 'Unable to update display name.');
+        return;
+      }
+      setOwnNameInput(res.normalizedName || validation.normalized);
+      setIsEditingOwnName(false);
+      setOwnNameSuccess('Display name updated successfully.');
+      setTimeout(() => setOwnNameSuccess(null), 4000);
+    } catch (err) {
+      console.error('Error saving own profile name:', err);
+      setOwnNameError('Unable to update display name. Please try again.');
+    } finally {
+      setOwnNameSaving(false);
+    }
+  };
+
+  const canEditMemberName = (m: DisplayMember): boolean => {
+    if (!user) return false;
+    if (m.uid === user.uid || m.id === user.uid) return true;
+    if (activeRole === 'OWNER') return true;
+    if (activeRole === 'MANAGER') {
+      return m.role === 'STOREKEEPER' || m.role === 'DEPARTMENT_STAFF';
+    }
+    return false;
+  };
+
+  const canManageMemberPermissions = (m: DisplayMember): boolean => {
+    if (!user || m.isOwner) return false;
+    if (m.id === user.uid || m.uid === user.uid) return false;
+    if (activeRole === 'OWNER') return true;
+    if (activeRole === 'MANAGER') {
+      return m.role === 'STOREKEEPER' || m.role === 'DEPARTMENT_STAFF';
+    }
+    return false;
+  };
+
+  const handleOpenEditName = (m: DisplayMember) => {
+    if (user && (m.uid === user.uid || m.id === user.uid)) {
+      handleStartEditOwnName();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+    setRenamingMember(m);
+    setRenameInput(m.name || '');
+    setRenameError(null);
+    setIsEditNameModalOpen(true);
+  };
+
+  const handleSaveMemberName = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeRestaurantId || !user || !renamingMember) return;
+    setRenameError(null);
+
+    const validation = validateDisplayName(renameInput);
+    if (!validation.valid) {
+      setRenameError(validation.error || 'Please enter a valid display name.');
+      return;
+    }
+
+    setRenameSaving(true);
+    try {
+      const res = await updateTeamMemberName(
+        activeRestaurantId,
+        renamingMember.id,
+        validation.normalized,
+        {
+          uid: user.uid,
+          name: userProfile?.name || user.displayName || 'Authorized Manager',
+          role: (activeRole as UserRole) || 'OWNER',
+        }
+      );
+
+      if (!res.success) {
+        setRenameError(res.error || 'Failed to update staff display name.');
+        return;
+      }
+
+      setTeamBanner({
+        type: 'success',
+        text: `Display name updated to "${res.normalizedName || validation.normalized}" for ${renamingMember.email}.`,
+      });
+      setTimeout(() => setTeamBanner(null), 4000);
+      setIsEditNameModalOpen(false);
+      setRenamingMember(null);
+    } catch (err) {
+      console.error('Error renaming team member:', err);
+      setRenameError('Unable to update team member display name.');
+    } finally {
+      setRenameSaving(false);
+    }
+  };
+
   const handleOpenEdit = (m: DisplayMember) => {
     setEditingMember(m);
     setEditRole(m.role);
@@ -335,7 +490,7 @@ export const SettingsView: React.FC = () => {
         },
         {
           uid: user.uid,
-          name: user.displayName || userProfile?.name || 'Authorized Manager',
+          name: userProfile?.name || user.displayName || 'Authorized Manager',
           role: (activeRole as UserRole) || 'OWNER',
         }
       );
@@ -357,6 +512,7 @@ export const SettingsView: React.FC = () => {
     if (!activeRestaurantId || !user) return;
     const newStatus = m.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
     setActionLoadingId(m.id);
+    setTeamBanner(null);
     try {
       const res = await updateTeamMember(
         activeRestaurantId,
@@ -364,16 +520,16 @@ export const SettingsView: React.FC = () => {
         { status: newStatus },
         {
           uid: user.uid,
-          name: user.displayName || userProfile?.name || 'Authorized Manager',
+          name: userProfile?.name || user.displayName || 'Authorized Manager',
           role: (activeRole as UserRole) || 'OWNER',
         }
       );
       if (!res.success && res.error) {
-        alert(res.error);
+        setTeamBanner({ type: 'error', text: res.error });
       }
     } catch (err) {
       console.error('Failed to toggle member status:', err);
-      alert('Unable to update member status. Please try again.');
+      setTeamBanner({ type: 'error', text: 'Unable to update member status. Please try again.' });
     } finally {
       setActionLoadingId(null);
     }
@@ -383,18 +539,19 @@ export const SettingsView: React.FC = () => {
     if (!activeRestaurantId || !user) return;
     if (!confirm(`Are you sure you want to remove ${memberName} from this restaurant?`)) return;
     setActionLoadingId(memberId);
+    setTeamBanner(null);
     try {
       const res = await removeTeamMember(activeRestaurantId, memberId, memberName, {
         uid: user.uid,
-        name: user.displayName || userProfile?.name || 'Authorized Manager',
+        name: userProfile?.name || user.displayName || 'Authorized Manager',
         role: (activeRole as UserRole) || 'OWNER',
       });
       if (!res.success && res.error) {
-        alert(res.error);
+        setTeamBanner({ type: 'error', text: res.error });
       }
     } catch (err) {
       console.error('Failed to remove member:', err);
-      alert('Unable to remove team member. Please try again.');
+      setTeamBanner({ type: 'error', text: 'Unable to remove team member. Please try again.' });
     } finally {
       setActionLoadingId(null);
     }
@@ -407,9 +564,146 @@ export const SettingsView: React.FC = () => {
         <div>
           <h1 className="text-xl font-bold text-stone-900 tracking-tight">System Settings & Controls</h1>
           <p className="text-xs text-stone-500 mt-1">
-            Configure restaurant thresholds, kitchen departments, staff roles, and price hike guards.
+            Configure your profile, restaurant thresholds, kitchen departments, staff roles, and price hike guards.
           </p>
         </div>
+      </div>
+
+      {/* My Profile / Edit Name Card */}
+      <div className="bg-white rounded-xl border border-stone-200 p-6 shadow-2xs space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-stone-100">
+          <div className="flex items-center gap-2">
+            <UserIcon className="w-4 h-4 text-[#FF5A1F]" />
+            <div>
+              <h2 className="text-xs font-bold text-[#0D2149] uppercase tracking-wider">
+                My Profile
+              </h2>
+              <p className="text-[11px] text-stone-500">
+                Manage your displayed full name. Login credentials and account permissions remain unchanged.
+              </p>
+            </div>
+          </div>
+          {!isEditingOwnName && (
+            <button
+              id="settings-edit-own-name-btn"
+              type="button"
+              onClick={handleStartEditOwnName}
+              className="self-start sm:self-auto flex items-center gap-1.5 px-3.5 py-1.5 bg-[#0D2149] hover:bg-[#163268] text-white rounded-lg text-xs font-semibold transition-colors shadow-2xs"
+            >
+              <Edit2 className="w-3.5 h-3.5 text-[#FF5A1F]" />
+              <span>Edit Name</span>
+            </button>
+          )}
+        </div>
+
+        {ownNameError && (
+          <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
+            <p className="font-semibold">{ownNameError}</p>
+          </div>
+        )}
+
+        {ownNameSuccess && (
+          <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs flex items-start gap-2">
+            <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-600" />
+            <p className="font-semibold">{ownNameSuccess}</p>
+          </div>
+        )}
+
+        {isEditingOwnName ? (
+          <form onSubmit={handleSaveOwnName} className="space-y-3 max-w-xl">
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label
+                  htmlFor="settings-own-name-input"
+                  className="block text-xs font-bold text-[#0D2149] uppercase tracking-wider"
+                >
+                  Full Display Name *
+                </label>
+                <span className="text-[11px] font-mono text-stone-400">
+                  {ownNameInput.trim().replace(/\s+/g, ' ').length}/{PROFILE_NAME_MAX_LENGTH}
+                </span>
+              </div>
+              <input
+                id="settings-own-name-input"
+                type="text"
+                required
+                autoFocus
+                disabled={ownNameSaving}
+                maxLength={PROFILE_NAME_MAX_LENGTH + 10}
+                value={ownNameInput}
+                onChange={(e) => {
+                  setOwnNameInput(e.target.value);
+                  if (ownNameError) setOwnNameError(null);
+                }}
+                placeholder="Enter your full name"
+                className="w-full px-3 py-2 text-xs font-medium text-stone-900 border border-stone-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#FF5A1F]/25 focus:border-[#FF5A1F] disabled:bg-stone-100"
+              />
+              <p className="text-[11px] text-stone-500 mt-1">
+                Must be between {PROFILE_NAME_MIN_LENGTH} and {PROFILE_NAME_MAX_LENGTH} characters.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                id="settings-save-own-name-btn"
+                type="submit"
+                disabled={ownNameSaving}
+                className="flex items-center gap-1.5 px-4 py-2 bg-[#FF5A1F] hover:bg-[#e54e17] text-white text-xs font-bold rounded-lg shadow-2xs transition-colors disabled:opacity-50"
+              >
+                {ownNameSaving ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Saving...</span>
+                  </>
+                ) : (
+                  <>
+                    <Save className="w-3.5 h-3.5" />
+                    <span>Save</span>
+                  </>
+                )}
+              </button>
+              <button
+                id="settings-cancel-own-name-btn"
+                type="button"
+                disabled={ownNameSaving}
+                onClick={handleCancelEditOwnName}
+                className="px-4 py-2 text-xs font-semibold text-stone-600 hover:text-stone-900 hover:bg-stone-100 rounded-lg transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
+            <div className="p-3 rounded-lg bg-stone-50 border border-stone-200/80">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-stone-400 block">
+                Display Name
+              </span>
+              <span className="text-sm font-bold text-[#0D2149] mt-0.5 block truncate">
+                {userProfile?.name || user?.displayName || 'User'}
+              </span>
+            </div>
+            <div className="p-3 rounded-lg bg-stone-50 border border-stone-200/80">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-stone-400 block">
+                Login Identity (Read-Only)
+              </span>
+              <span className="text-xs font-mono text-stone-700 mt-1 flex items-center gap-1.5 truncate">
+                {user?.email ? <Mail className="w-3.5 h-3.5 text-stone-400 shrink-0" /> : <Phone className="w-3.5 h-3.5 text-stone-400 shrink-0" />}
+                <span className="truncate">{userProfile?.email || user?.email || userProfile?.phone || user?.phoneNumber || '—'}</span>
+              </span>
+            </div>
+            <div className="p-3 rounded-lg bg-stone-50 border border-stone-200/80">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-stone-400 block">
+                Account Role
+              </span>
+              <div className="mt-1">
+                <Badge variant={activeRole === 'OWNER' ? 'success' : 'info'} size="sm">
+                  {activeRole || 'STAFF'}
+                </Badge>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -590,7 +884,24 @@ export const SettingsView: React.FC = () => {
         </div>
 
         {/* Active Team Members */}
-        <div className="space-y-2">
+        <div className="space-y-3">
+          {teamBanner && (
+            <div
+              className={`p-3 rounded-lg border text-xs flex items-start gap-2 ${
+                teamBanner.type === 'success'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-rose-50 border-rose-200 text-rose-700'
+              }`}
+            >
+              {teamBanner.type === 'success' ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-600" />
+              ) : (
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
+              )}
+              <p className="font-semibold">{teamBanner.text}</p>
+            </div>
+          )}
+
           <div className="flex items-center justify-between">
             <h3 className="text-xs font-bold text-stone-700 uppercase tracking-wider">
               Active Team Members ({activeTeamMembers.length})
@@ -618,95 +929,119 @@ export const SettingsView: React.FC = () => {
                     </td>
                   </tr>
                 ) : (
-                  activeTeamMembers.map((m) => (
-                    <tr key={m.id} className="hover:bg-stone-50/60">
-                      <td className="py-2.5 px-4 font-semibold text-stone-900">
-                        <div className="flex items-center gap-2">
-                          <div className="w-6 h-6 rounded-full bg-stone-200 flex items-center justify-center font-bold text-stone-700 text-[11px]">
-                            {m.name.charAt(0).toUpperCase()}
-                          </div>
-                          <span>{m.name}</span>
-                        </div>
-                      </td>
-                      <td className="py-2.5 px-4 text-stone-600 font-mono text-[11px]">{m.email}</td>
-                      <td className="py-2.5 px-4">
-                        <Badge
-                          variant={
-                            m.role === 'OWNER'
-                              ? 'success'
-                              : m.role === 'MANAGER'
-                              ? 'info'
-                              : m.role === 'STOREKEEPER'
-                              ? 'warning'
-                              : 'neutral'
-                          }
-                          size="sm"
-                        >
-                          {m.role}
-                        </Badge>
-                      </td>
-                      <td className="py-2.5 px-4 text-stone-500">
-                        {departments.find((d) => d.id === m.departmentId)?.name || m.departmentName || 'All Departments'}
-                      </td>
-                      <td className="py-2.5 px-4">
-                        {m.status === 'ACTIVE' ? (
-                          <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200/80 px-2.5 py-0.5 rounded-full">
-                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-600"></span>
-                            ACTIVE
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-rose-800 bg-rose-50 border border-rose-200/80 px-2.5 py-0.5 rounded-full">
-                            <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>
-                            INACTIVE
-                          </span>
-                        )}
-                      </td>
-                      {hasRole(['OWNER', 'MANAGER']) && (
-                        <td className="py-2.5 px-4 text-right">
-                          <div className="flex items-center justify-end gap-1.5">
-                            {!m.isOwner && (
-                              <>
-                                <button
-                                  onClick={() => handleOpenEdit(m)}
-                                  disabled={actionLoadingId === m.id}
-                                  title="Edit Role & Department"
-                                  className="p-1 text-stone-500 hover:text-stone-900 hover:bg-stone-100 rounded transition-colors"
-                                >
-                                  <Edit2 className="w-3.5 h-3.5" />
-                                </button>
-                                <button
-                                  onClick={() => handleToggleStatus(m)}
-                                  disabled={actionLoadingId === m.id}
-                                  title={m.status === 'ACTIVE' ? 'Deactivate team member' : 'Activate team member'}
-                                  className={`px-2 py-0.5 text-[11px] font-semibold rounded border transition-colors ${
-                                    m.status === 'ACTIVE'
-                                      ? 'text-amber-700 bg-amber-50/50 border-amber-200 hover:bg-amber-100/60'
-                                      : 'text-emerald-700 bg-emerald-50/50 border-emerald-200 hover:bg-emerald-100/60'
-                                  }`}
-                                >
-                                  {m.status === 'ACTIVE' ? 'Deactivate' : 'Activate'}
-                                </button>
-                              </>
-                            )}
-                            {!m.isOwner && user?.uid !== m.id && user?.uid !== m.uid && (
-                              <button
-                                onClick={() => handleRemoveMember(m.id, m.name)}
-                                disabled={actionLoadingId === m.id}
-                                title="Remove team member"
-                                className="p-1 text-stone-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors"
-                              >
-                                {actionLoadingId === m.id ? (
-                                  <Loader2 className="w-3.5 h-3.5 animate-spin text-rose-600" />
-                                ) : (
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                )}
-                              </button>
+                  activeTeamMembers.map((m) => {
+                    const isSelf = Boolean(user && (m.id === user.uid || m.uid === user.uid));
+                    const allowEditName = canEditMemberName(m);
+                    const allowManagePerms = canManageMemberPermissions(m);
+
+                    return (
+                      <tr key={m.id} className="hover:bg-stone-50/60">
+                        <td className="py-2.5 px-4 font-semibold text-stone-900">
+                          <div className="flex items-center gap-2">
+                            <div className="w-6 h-6 rounded-full bg-stone-200 flex items-center justify-center font-bold text-stone-700 text-[11px] shrink-0">
+                              {m.name.charAt(0).toUpperCase()}
+                            </div>
+                            <span>{m.name}</span>
+                            {isSelf && (
+                              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#0D2149]/10 text-[#0D2149]">
+                                You
+                              </span>
                             )}
                           </div>
                         </td>
-                      )}
-                    </tr>
-                  ))
+                        <td className="py-2.5 px-4 text-stone-600 font-mono text-[11px]">{m.email}</td>
+                        <td className="py-2.5 px-4">
+                          <Badge
+                            variant={
+                              m.role === 'OWNER'
+                                ? 'success'
+                                : m.role === 'MANAGER'
+                                ? 'info'
+                                : m.role === 'STOREKEEPER'
+                                ? 'warning'
+                                : 'neutral'
+                            }
+                            size="sm"
+                          >
+                            {m.role}
+                          </Badge>
+                        </td>
+                        <td className="py-2.5 px-4 text-stone-500">
+                          {departments.find((d) => d.id === m.departmentId)?.name || m.departmentName || 'All Departments'}
+                        </td>
+                        <td className="py-2.5 px-4">
+                          {m.status === 'ACTIVE' ? (
+                            <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200/80 px-2.5 py-0.5 rounded-full">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-600"></span>
+                              ACTIVE
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1.5 text-[11px] font-bold text-rose-800 bg-rose-50 border border-rose-200/80 px-2.5 py-0.5 rounded-full">
+                              <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>
+                              INACTIVE
+                            </span>
+                          )}
+                        </td>
+                        {hasRole(['OWNER', 'MANAGER']) && (
+                          <td className="py-2.5 px-4 text-right">
+                            <div className="flex items-center justify-end gap-1.5">
+                              {allowEditName && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenEditName(m)}
+                                  disabled={actionLoadingId === m.id}
+                                  title="Edit Display Name"
+                                  className="px-2 py-0.5 text-[11px] font-semibold text-[#0D2149] bg-stone-100 hover:bg-orange-50 hover:text-[#FF5A1F] border border-stone-200 rounded transition-colors inline-flex items-center gap-1"
+                                >
+                                  <Edit2 className="w-3 h-3" />
+                                  <span>Edit Name</span>
+                                </button>
+                              )}
+                              {allowManagePerms && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenEdit(m)}
+                                    disabled={actionLoadingId === m.id}
+                                    title="Edit Role & Department"
+                                    className="p-1 text-stone-500 hover:text-stone-900 hover:bg-stone-100 rounded transition-colors"
+                                  >
+                                    <Shield className="w-3.5 h-3.5" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleStatus(m)}
+                                    disabled={actionLoadingId === m.id}
+                                    title={m.status === 'ACTIVE' ? 'Deactivate team member' : 'Activate team member'}
+                                    className={`px-2 py-0.5 text-[11px] font-semibold rounded border transition-colors ${
+                                      m.status === 'ACTIVE'
+                                        ? 'text-amber-700 bg-amber-50/50 border-amber-200 hover:bg-amber-100/60'
+                                        : 'text-emerald-700 bg-emerald-50/50 border-emerald-200 hover:bg-emerald-100/60'
+                                    }`}
+                                  >
+                                    {m.status === 'ACTIVE' ? 'Deactivate' : 'Activate'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveMember(m.id, m.name)}
+                                    disabled={actionLoadingId === m.id}
+                                    title="Remove team member"
+                                    className="p-1 text-stone-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors"
+                                  >
+                                    {actionLoadingId === m.id ? (
+                                      <Loader2 className="w-3.5 h-3.5 animate-spin text-rose-600" />
+                                    ) : (
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    )}
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          </td>
+                        )}
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -990,6 +1325,95 @@ export const SettingsView: React.FC = () => {
                 </>
               ) : (
                 <span>Update Member</span>
+              )}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* Edit Staff Member Display Name Modal */}
+      <Modal
+        id="edit-team-member-name-modal"
+        isOpen={isEditNameModalOpen}
+        onClose={() => {
+          if (!renameSaving) {
+            setIsEditNameModalOpen(false);
+            setRenamingMember(null);
+            setRenameError(null);
+          }
+        }}
+        title="Edit Staff Display Name"
+        subtitle={renamingMember ? `${renamingMember.email} • ${renamingMember.role}` : 'Update staff member display name'}
+        maxWidth="md"
+      >
+        <form onSubmit={handleSaveMemberName} className="space-y-4">
+          {renameError && (
+            <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
+              <p className="font-semibold">{renameError}</p>
+            </div>
+          )}
+
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <label
+                htmlFor="team-member-name-input"
+                className="block text-xs font-bold text-[#0D2149] uppercase tracking-wider"
+              >
+                Staff Display Name *
+              </label>
+              <span className="text-[11px] font-mono text-stone-400">
+                {renameInput.trim().replace(/\s+/g, ' ').length}/{PROFILE_NAME_MAX_LENGTH}
+              </span>
+            </div>
+            <input
+              id="team-member-name-input"
+              type="text"
+              required
+              autoFocus
+              disabled={renameSaving}
+              maxLength={PROFILE_NAME_MAX_LENGTH + 10}
+              placeholder="Enter staff member full name"
+              value={renameInput}
+              onChange={(e) => {
+                setRenameInput(e.target.value);
+                if (renameError) setRenameError(null);
+              }}
+              className="w-full px-3 py-2 text-xs font-medium text-stone-900 border border-stone-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#FF5A1F]/25 focus:border-[#FF5A1F] disabled:bg-stone-100"
+            />
+            <p className="text-[11px] text-stone-500 mt-1">
+              Updates only the display name. Email login, UID, role, and permissions remain unchanged.
+            </p>
+          </div>
+
+          <div className="pt-3 flex justify-end gap-2 border-t border-stone-100">
+            <button
+              type="button"
+              disabled={renameSaving}
+              onClick={() => {
+                setIsEditNameModalOpen(false);
+                setRenamingMember(null);
+                setRenameError(null);
+              }}
+              className="px-4 py-2 text-xs font-semibold text-stone-600 hover:text-stone-900 hover:bg-stone-100 rounded-lg transition-colors disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={renameSaving}
+              className="flex items-center gap-1.5 px-5 py-2 bg-[#FF5A1F] hover:bg-[#e54e17] text-white text-xs font-bold rounded-lg shadow-xs disabled:opacity-50 transition-colors"
+            >
+              {renameSaving ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Saving...</span>
+                </>
+              ) : (
+                <>
+                  <Save className="w-3.5 h-3.5" />
+                  <span>Save Name</span>
+                </>
               )}
             </button>
           </div>

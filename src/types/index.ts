@@ -3,6 +3,7 @@ export type UserRole = 'OWNER' | 'MANAGER' | 'STOREKEEPER' | 'DEPARTMENT_STAFF';
 export interface UserProfile {
   uid: string;
   name: string;
+  nameUpdatedAt?: string;
   email?: string;
   phone?: string;
   photoURL?: string;
@@ -33,6 +34,7 @@ export interface Restaurant {
 export interface RestaurantUser {
   uid: string;
   name: string;
+  nameUpdatedAt?: string;
   email?: string;
   phone?: string;
   role: UserRole;
@@ -54,6 +56,7 @@ export interface StaffAuthorization {
   restaurantName?: string;
   email: string;
   fullName: string;
+  nameUpdatedAt?: string;
   role: UserRole;
   departmentId?: string | null;
   departmentName?: string | null;

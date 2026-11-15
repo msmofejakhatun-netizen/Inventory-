@@ -7,6 +7,7 @@
       "properties": {
         "uid": { "type": "string" },
         "name": { "type": "string", "maxLength": 100 },
+        "nameUpdatedAt": { "type": "string" },
         "email": { "type": "string", "maxLength": 150 },
         "phone": { "type": "string", "maxLength": 30 },
         "photoURL": { "type": "string", "maxLength": 500 },
@@ -44,6 +45,7 @@
       "properties": {
         "uid": { "type": "string" },
         "name": { "type": "string", "maxLength": 100 },
+        "nameUpdatedAt": { "type": "string" },
         "email": { "type": "string", "maxLength": 150 },
         "phone": { "type": "string", "maxLength": 30 },
         "role": { "type": "string", "enum": ["OWNER", "MANAGER", "STOREKEEPER", "DEPARTMENT_STAFF"] },
@@ -87,6 +89,7 @@
         "restaurantName": { "type": "string" },
         "email": { "type": "string" },
         "fullName": { "type": "string" },
+        "nameUpdatedAt": { "type": "string" },
         "role": { "type": "string", "enum": ["OWNER", "MANAGER", "STOREKEEPER", "DEPARTMENT_STAFF"] },
         "departmentId": { "type": "string" },
         "departmentName": { "type": "string" },

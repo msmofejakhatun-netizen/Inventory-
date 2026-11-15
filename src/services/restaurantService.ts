@@ -20,6 +20,7 @@ import {
 import { db } from '../firebase/config';
 import { handleFirestoreError, OperationType } from '../firebase/errorHandler';
 import { calculateWeightedAverageCost } from './calculations';
+import { validateDisplayName } from '../utils/profileValidation';
 import {
   Restaurant,
   RestaurantUser,
@@ -1915,6 +1916,122 @@ export async function inviteTeamMember(
   };
 }
 
+export async function updateTeamMemberName(
+  restaurantId: string,
+  memberId: string,
+  newName: string,
+  caller: { uid: string; name: string; role: UserRole }
+): Promise<{ success: boolean; normalizedName?: string; error?: string }> {
+  try {
+    if (caller.role !== 'OWNER' && caller.role !== 'MANAGER') {
+      return { success: false, error: 'Only Owners or Managers can rename team members.' };
+    }
+
+    const validation = validateDisplayName(newName);
+    if (!validation.valid) {
+      return { success: false, error: validation.error || 'Invalid display name.' };
+    }
+
+    const normalizedName = validation.normalized;
+    const now = new Date().toISOString();
+
+    // Locate member across users and authorizations subcollections
+    let userDocRef = doc(db, 'restaurants', restaurantId, 'users', memberId);
+    let userSnap = await getDoc(userDocRef);
+
+    let authDocRef = doc(db, 'restaurants', restaurantId, 'authorizations', memberId);
+    let authSnap = await getDoc(authDocRef);
+
+    if (!authSnap.exists()) {
+      const authByUidQuery = query(
+        collection(db, 'restaurants', restaurantId, 'authorizations'),
+        where('attachedUid', '==', memberId),
+        limit(1)
+      );
+      const authByUidSnap = await getDocs(authByUidQuery);
+      if (!authByUidSnap.empty) {
+        authSnap = authByUidSnap.docs[0];
+        authDocRef = authSnap.ref;
+      }
+    }
+
+    // If memberId was an authorization ID and attachedUid points to a users/{uid} doc
+    if (!userSnap.exists() && authSnap.exists()) {
+      const authData = authSnap.data() as StaffAuthorization;
+      if (authData.attachedUid) {
+        const linkedUserRef = doc(db, 'restaurants', restaurantId, 'users', authData.attachedUid);
+        const linkedUserSnap = await getDoc(linkedUserRef);
+        if (linkedUserSnap.exists()) {
+          userSnap = linkedUserSnap;
+          userDocRef = linkedUserRef;
+        }
+      }
+    }
+
+    if (!userSnap.exists() && !authSnap.exists()) {
+      return { success: false, error: 'Team member record not found.' };
+    }
+
+    const userData = userSnap.exists() ? (userSnap.data() as RestaurantUser) : null;
+    const authData = authSnap.exists() ? (authSnap.data() as StaffAuthorization) : null;
+    const targetRole: UserRole = userData?.role || authData?.role || 'DEPARTMENT_STAFF';
+    const targetUid = userData?.uid || authData?.attachedUid || memberId;
+    const targetEmail = userData?.email || authData?.email || '';
+    const previousName = userData?.name || authData?.fullName || 'Team Member';
+
+    if (targetRole === 'OWNER' && caller.role !== 'OWNER') {
+      return { success: false, error: 'Only the Restaurant Owner can edit the Owner display name.' };
+    }
+
+    if (caller.role === 'MANAGER' && (targetRole === 'OWNER' || targetRole === 'MANAGER')) {
+      return { success: false, error: 'Managers can only edit names for Storekeeper and Department Staff.' };
+    }
+
+    if (previousName === normalizedName) {
+      return { success: true, normalizedName };
+    }
+
+    const batch = writeBatch(db);
+
+    if (userSnap.exists()) {
+      batch.update(userDocRef, {
+        name: normalizedName,
+        nameUpdatedAt: now,
+      });
+    }
+
+    if (authSnap.exists()) {
+      batch.update(authDocRef, {
+        fullName: normalizedName,
+        nameUpdatedAt: now,
+      });
+    }
+
+    const auditRef = doc(collection(db, 'restaurants', restaurantId, 'auditLogs'));
+    const auditData: AuditLog = {
+      id: auditRef.id,
+      actorUid: caller.uid,
+      actorName: caller.name,
+      actorRole: caller.role,
+      action: 'TEAM_MEMBER_NAME_UPDATED',
+      entity: 'TeamMember',
+      entityId: targetUid,
+      details: `Updated team member display name from "${previousName}" to "${normalizedName}" (${targetEmail || targetUid})`,
+      targetEmail,
+      targetRole,
+      restaurantId,
+      createdAt: now,
+    };
+    batch.set(auditRef, auditData);
+
+    await batch.commit();
+    return { success: true, normalizedName };
+  } catch (err) {
+    console.error('[updateTeamMemberName] Technical diagnostic error:', err);
+    return { success: false, error: 'Unable to update team member display name. Please try again.' };
+  }
+}
+
 export async function updateTeamMember(
   restaurantId: string,
   memberId: string,
@@ -1932,6 +2049,10 @@ export async function updateTeamMember(
       return { success: false, error: 'Only Owners or Managers can update team members.' };
     }
 
+    if (caller.uid === memberId) {
+      return { success: false, error: 'You cannot modify your own role or account status.' };
+    }
+
     if (caller.role === 'MANAGER' && (updates.role === 'OWNER' || updates.role === 'MANAGER')) {
       return { success: false, error: 'Managers cannot assign Owner or Manager roles.' };
     }
@@ -1940,14 +2061,22 @@ export async function updateTeamMember(
     const now = new Date().toISOString();
     let updatedName = 'Team Member';
     let updatedEmail = '';
+    let existingRole: UserRole | null = null;
 
     // Check in users subcollection
     const userRef = doc(db, 'restaurants', restaurantId, 'users', memberId);
     const userSnap = await getDoc(userRef);
     if (userSnap.exists()) {
       const userData = userSnap.data() as RestaurantUser;
+      existingRole = userData.role;
+      if (userData.uid === caller.uid) {
+        return { success: false, error: 'You cannot modify your own role or account status.' };
+      }
       if (userData.role === 'OWNER' && caller.role !== 'OWNER') {
         return { success: false, error: 'Only the Restaurant Owner can modify Owner permissions.' };
+      }
+      if (caller.role === 'MANAGER' && (userData.role === 'OWNER' || userData.role === 'MANAGER')) {
+        return { success: false, error: 'Managers can only update Storekeeper and Department Staff members.' };
       }
       updatedName = userData.name;
       updatedEmail = userData.email || '';
@@ -1961,6 +2090,16 @@ export async function updateTeamMember(
     const authSnap = await getDoc(authRef);
     if (authSnap.exists()) {
       const authData = authSnap.data() as StaffAuthorization;
+      existingRole = existingRole || authData.role;
+      if (authData.attachedUid === caller.uid) {
+        return { success: false, error: 'You cannot modify your own role or account status.' };
+      }
+      if (authData.role === 'OWNER' && caller.role !== 'OWNER') {
+        return { success: false, error: 'Only the Restaurant Owner can modify Owner permissions.' };
+      }
+      if (caller.role === 'MANAGER' && (authData.role === 'OWNER' || authData.role === 'MANAGER')) {
+        return { success: false, error: 'Managers can only update Storekeeper and Department Staff members.' };
+      }
       updatedName = authData.fullName;
       updatedEmail = authData.email;
       batch.update(authRef, {
@@ -1975,6 +2114,13 @@ export async function updateTeamMember(
       );
       const authQuerySnap = await getDocs(authQuery);
       if (!authQuerySnap.empty) {
+        const authData = authQuerySnap.docs[0].data() as StaffAuthorization;
+        if (authData.role === 'OWNER' && caller.role !== 'OWNER') {
+          return { success: false, error: 'Only the Restaurant Owner can modify Owner permissions.' };
+        }
+        if (caller.role === 'MANAGER' && (authData.role === 'OWNER' || authData.role === 'MANAGER')) {
+          return { success: false, error: 'Managers can only update Storekeeper and Department Staff members.' };
+        }
         batch.update(authQuerySnap.docs[0].ref, {
           ...updates,
         });
@@ -1993,7 +2139,7 @@ export async function updateTeamMember(
       entityId: memberId,
       details: `Updated team member ${updatedName} (${updatedEmail}) - Role: ${updates.role || 'unchanged'}, Status: ${updates.status || 'unchanged'}`,
       targetEmail: updatedEmail,
-      targetRole: updates.role || 'DEPARTMENT_STAFF',
+      targetRole: updates.role || existingRole || 'DEPARTMENT_STAFF',
       restaurantId,
       createdAt: now,
     };
@@ -2147,7 +2293,27 @@ export async function syncUserAuthorizations(user: {
   const activatedRestaurantIds: string[] = [];
   const now = new Date().toISOString();
 
+  const pickFreshestName = (
+    candidates: Array<{ name?: string | null; updatedAt?: string | null }>
+  ): { name: string; nameUpdatedAt?: string } => {
+    const valid = candidates.filter((c) => typeof c.name === 'string' && c.name.trim().length > 0);
+    if (valid.length === 0) return { name: 'Staff Member' };
+
+    const withTs = valid
+      .filter((c) => Boolean(c.updatedAt))
+      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+
+    if (withTs.length > 0) {
+      return { name: withTs[0].name!.trim(), nameUpdatedAt: withTs[0].updatedAt! };
+    }
+    return { name: valid[0].name!.trim() };
+  };
+
   try {
+    const rootUserRef = doc(db, 'users', user.uid);
+    const rootUserSnap = await getDoc(rootUserRef);
+    const rootUserData = rootUserSnap.exists() ? (rootUserSnap.data() as { name?: string; nameUpdatedAt?: string }) : null;
+
     // 1. Sync from direct active authorizations
     const authQuery = query(
       collectionGroup(db, 'authorizations'),
@@ -2163,30 +2329,68 @@ export async function syncUserAuthorizations(user: {
 
       try {
         const userMemberRef = doc(db, 'restaurants', rId, 'users', user.uid);
+        const existingMemberSnap = await getDoc(userMemberRef);
+        const existingMemberData = existingMemberSnap.exists()
+          ? (existingMemberSnap.data() as RestaurantUser)
+          : null;
+
+        const freshest = pickFreshestName([
+          { name: existingMemberData?.name, updatedAt: existingMemberData?.nameUpdatedAt },
+          { name: rootUserData?.name, updatedAt: rootUserData?.nameUpdatedAt },
+          { name: authData.fullName, updatedAt: authData.nameUpdatedAt },
+          { name: user.displayName, updatedAt: undefined },
+        ]);
+
         const batch = writeBatch(db);
 
-        const newMember: RestaurantUser = {
-          uid: user.uid,
-          name: authData.fullName || user.displayName || 'Staff Member',
-          email: normalizedEmail,
-          role: authData.role,
-          departmentId: authData.departmentId || null,
-          departmentName: authData.departmentName || null,
-          restaurantId: rId,
-          status: 'ACTIVE',
-          accountStatus: 'ACTIVE',
-          authorizedByUid: authData.authorizedByUid,
-          authorizedByName: authData.authorizedByName,
-          authorizedAt: authData.authorizedAt,
-          authorizationId: d.id,
-          createdAt: now,
-        };
+        if (existingMemberSnap.exists()) {
+          const memberUpdates: Partial<RestaurantUser> = {};
+          if (freshest.name && freshest.name !== existingMemberData?.name) {
+            memberUpdates.name = freshest.name;
+          }
+          if (freshest.nameUpdatedAt && freshest.nameUpdatedAt !== existingMemberData?.nameUpdatedAt) {
+            memberUpdates.nameUpdatedAt = freshest.nameUpdatedAt;
+          }
+          if (existingMemberData?.authorizationId !== d.id) {
+            memberUpdates.authorizationId = d.id;
+          }
+          if (Object.keys(memberUpdates).length > 0) {
+            batch.update(userMemberRef, memberUpdates);
+          }
+        } else {
+          const newMember: RestaurantUser = {
+            uid: user.uid,
+            name: freshest.name || authData.fullName || user.displayName || 'Staff Member',
+            ...(freshest.nameUpdatedAt ? { nameUpdatedAt: freshest.nameUpdatedAt } : {}),
+            email: normalizedEmail,
+            role: authData.role,
+            departmentId: authData.departmentId || null,
+            departmentName: authData.departmentName || null,
+            restaurantId: rId,
+            status: 'ACTIVE',
+            accountStatus: 'ACTIVE',
+            authorizedByUid: authData.authorizedByUid,
+            authorizedByName: authData.authorizedByName,
+            authorizedAt: authData.authorizedAt,
+            authorizationId: d.id,
+            createdAt: now,
+          };
+          batch.set(userMemberRef, newMember);
+        }
 
-        batch.set(userMemberRef, newMember, { merge: true });
-        batch.update(d.ref, { attachedUid: user.uid });
+        const authUpdates: Partial<StaffAuthorization> = {};
+        if (authData.attachedUid !== user.uid) {
+          authUpdates.attachedUid = user.uid;
+        }
+        if (freshest.name && freshest.name !== authData.fullName && freshest.nameUpdatedAt) {
+          authUpdates.fullName = freshest.name;
+          authUpdates.nameUpdatedAt = freshest.nameUpdatedAt;
+        }
+        if (Object.keys(authUpdates).length > 0) {
+          batch.update(d.ref, authUpdates);
+        }
 
         // Add to user's root profile restaurantIds
-        const rootUserRef = doc(db, 'users', user.uid);
         batch.set(
           rootUserRef,
           {
@@ -2218,32 +2422,57 @@ export async function syncUserAuthorizations(user: {
 
       try {
         const userMemberRef = doc(db, 'restaurants', rId, 'users', user.uid);
+        const existingMemberSnap = await getDoc(userMemberRef);
+        const existingMemberData = existingMemberSnap.exists()
+          ? (existingMemberSnap.data() as RestaurantUser)
+          : null;
+
+        const freshest = pickFreshestName([
+          { name: existingMemberData?.name, updatedAt: existingMemberData?.nameUpdatedAt },
+          { name: rootUserData?.name, updatedAt: rootUserData?.nameUpdatedAt },
+          { name: user.displayName, updatedAt: undefined },
+          { name: inv.fullName, updatedAt: undefined },
+        ]);
+
         const batch = writeBatch(db);
 
-        const newMember: RestaurantUser = {
-          uid: user.uid,
-          name: user.displayName || inv.fullName || 'Staff Member',
-          email: normalizedEmail,
-          role: inv.requestedRole,
-          departmentId: inv.departmentId || null,
-          departmentName: inv.departmentName || null,
-          restaurantId: rId,
-          status: 'ACTIVE',
-          accountStatus: 'ACTIVE',
-          authorizedByUid: inv.invitedByUid,
-          authorizedByName: inv.invitedByName,
-          authorizedAt: inv.invitedAt,
-          createdAt: now,
-        };
+        if (existingMemberSnap.exists()) {
+          const memberUpdates: Partial<RestaurantUser> = {};
+          if (freshest.name && freshest.name !== existingMemberData?.name) {
+            memberUpdates.name = freshest.name;
+          }
+          if (freshest.nameUpdatedAt && freshest.nameUpdatedAt !== existingMemberData?.nameUpdatedAt) {
+            memberUpdates.nameUpdatedAt = freshest.nameUpdatedAt;
+          }
+          if (Object.keys(memberUpdates).length > 0) {
+            batch.update(userMemberRef, memberUpdates);
+          }
+        } else {
+          const newMember: RestaurantUser = {
+            uid: user.uid,
+            name: freshest.name || user.displayName || inv.fullName || 'Staff Member',
+            ...(freshest.nameUpdatedAt ? { nameUpdatedAt: freshest.nameUpdatedAt } : {}),
+            email: normalizedEmail,
+            role: inv.requestedRole,
+            departmentId: inv.departmentId || null,
+            departmentName: inv.departmentName || null,
+            restaurantId: rId,
+            status: 'ACTIVE',
+            accountStatus: 'ACTIVE',
+            authorizedByUid: inv.invitedByUid,
+            authorizedByName: inv.invitedByName,
+            authorizedAt: inv.invitedAt,
+            createdAt: now,
+          };
+          batch.set(userMemberRef, newMember);
+        }
 
-        batch.set(userMemberRef, newMember, { merge: true });
         batch.update(d.ref, {
           status: 'ACCEPTED',
           acceptedAt: now,
           acceptedByUid: user.uid,
         });
 
-        const rootUserRef = doc(db, 'users', user.uid);
         batch.set(
           rootUserRef,
           {

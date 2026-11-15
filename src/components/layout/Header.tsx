@@ -11,11 +11,13 @@ import {
   WifiOff,
   Store,
   Plus,
+  Edit2,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { NotificationDrawer } from './NotificationDrawer';
 import { PWAInstallMenuItem } from '../pwa/PWAInstallMenuItem';
 import { StoqoLogo, StoqoIcon } from '../brand/StoqoLogo';
+import { EditProfileModal } from '../profile/EditProfileModal';
 
 interface HeaderProps {
   onToggleMobileMenu: () => void;
@@ -41,6 +43,7 @@ export const Header: React.FC<HeaderProps> = ({
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const [isNotifDrawerOpen, setIsNotifDrawerOpen] = useState(false);
   const [unreadNotifCount, setUnreadNotifCount] = useState(0);
+  const [isEditProfileModalOpen, setIsEditProfileModalOpen] = useState(false);
 
   return (
     <>
@@ -195,6 +198,18 @@ export const Header: React.FC<HeaderProps> = ({
                     <span className="text-emerald-600 font-medium">Active Account</span>
                   </div>
                   <PWAInstallMenuItem onActionComplete={() => setIsUserMenuOpen(false)} />
+                  <button
+                    id="header-edit-profile-btn"
+                    type="button"
+                    onClick={() => {
+                      setIsUserMenuOpen(false);
+                      setIsEditProfileModalOpen(true);
+                    }}
+                    className="w-full text-left px-3 py-2 text-xs text-[#0D2149] hover:bg-orange-50/70 flex items-center gap-2 font-semibold transition-colors"
+                  >
+                    <Edit2 className="w-3.5 h-3.5 text-[#FF5A1F]" />
+                    <span>Edit Profile / Name</span>
+                  </button>
                 </div>
                 <div className="border-t border-stone-100 my-1" />
                 <button
@@ -216,6 +231,12 @@ export const Header: React.FC<HeaderProps> = ({
         isOpen={isNotifDrawerOpen}
         onClose={() => setIsNotifDrawerOpen(false)}
         onUnreadCountChange={setUnreadNotifCount}
+      />
+
+      {/* Self Edit Profile / Display Name Modal */}
+      <EditProfileModal
+        isOpen={isEditProfileModalOpen}
+        onClose={() => setIsEditProfileModalOpen(false)}
       />
     </>
   );

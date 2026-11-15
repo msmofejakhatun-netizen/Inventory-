@@ -9,22 +9,26 @@ import {
   signInWithPhoneNumber,
   ConfirmationResult,
   deleteUser,
+  updateProfile,
 } from 'firebase/auth';
 import {
   doc,
   getDoc,
   setDoc,
+  updateDoc,
   onSnapshot,
   collection,
   getDocs,
   query,
   where,
+  limit,
   collectionGroup,
 } from 'firebase/firestore';
 import { auth, db, validateFirebaseConnection } from '../firebase/config';
 import { handleFirestoreError, OperationType } from '../firebase/errorHandler';
-import { UserProfile, Restaurant, RestaurantUser, StaffAuthorization, UserRole } from '../types';
+import { UserProfile, Restaurant, RestaurantUser, StaffAuthorization, UserRole, AuditLog } from '../types';
 import { syncUserAuthorizations } from '../services/restaurantService';
+import { validateDisplayName } from '../utils/profileValidation';
 
 export type LoadingStage = 'connecting' | 'authenticating' | 'fetching_data' | 'syncing_inventory' | 'ready';
 
@@ -50,6 +54,7 @@ interface AuthContextType {
   switchRestaurant: (restaurantId: string) => void;
   refreshRestaurants: () => Promise<void>;
   hasRole: (allowedRoles: UserRole[]) => boolean;
+  updateOwnProfileName: (newName: string) => Promise<{ success: boolean; normalizedName?: string; error?: string }>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -150,7 +155,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         // Fetch restaurants for this user
         setLoadingStage('syncing_inventory');
         setLoadingProgress(90);
-        await loadUserRestaurants(currentUser.uid, effectiveRestaurantIds);
+        await loadUserRestaurants(currentUser.uid, effectiveRestaurantIds, profileData);
 
         setLoadingStage('ready');
         setLoadingProgress(100);
@@ -216,7 +221,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         setLoadingStage('syncing_inventory');
         setLoadingProgress(90);
-        await loadUserRestaurants(currentUser.uid, profile.restaurantIds || []);
+        await loadUserRestaurants(currentUser.uid, profile.restaurantIds || [], profile);
       }
 
       setLoadingStage('ready');
@@ -230,7 +235,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   // Fetch restaurants where user is owner or member
-  const loadUserRestaurants = async (uid: string, assignedRestaurantIds: string[]) => {
+  const loadUserRestaurants = async (
+    uid: string,
+    assignedRestaurantIds: string[],
+    currentProfile?: UserProfile
+  ) => {
     try {
       // 1. Query restaurants owned by user
       const ownedQuery = query(collection(db, 'restaurants'), where('ownerUid', '==', uid));
@@ -283,7 +292,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const defaultRest = all[0];
         setActiveRestaurant(defaultRest);
         setActiveRestaurantId(defaultRest.id);
-        await resolveUserRole(uid, defaultRest);
+        await resolveUserRole(uid, defaultRest, currentProfile);
       } else {
         setActiveRestaurant(null);
         setActiveRestaurantId(null);
@@ -294,17 +303,52 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  // Resolve user role in active restaurant
-  const resolveUserRole = async (uid: string, restaurant: Restaurant) => {
+  // Resolve user role in active restaurant and reconcile display name if updated by an admin
+  const resolveUserRole = async (uid: string, restaurant: Restaurant, currentProfile?: UserProfile) => {
+    const syncMemberDisplayNameIfNewer = async (memberName?: string, memberNameUpdatedAt?: string) => {
+      if (!memberName || !memberNameUpdatedAt) return;
+      const knownProfile = currentProfile || userProfile;
+      const rootUpdatedAt = knownProfile?.nameUpdatedAt || '';
+      if (!rootUpdatedAt || memberNameUpdatedAt > rootUpdatedAt) {
+        if (knownProfile?.name !== memberName) {
+          try {
+            if (auth.currentUser) {
+              await updateProfile(auth.currentUser, { displayName: memberName });
+            }
+            await updateDoc(doc(db, 'users', uid), {
+              name: memberName,
+              nameUpdatedAt: memberNameUpdatedAt,
+            });
+            setUserProfile((prev) =>
+              prev ? { ...prev, name: memberName, nameUpdatedAt: memberNameUpdatedAt } : prev
+            );
+          } catch (syncNameErr) {
+            console.error('Failed to reconcile updated member display name:', syncNameErr);
+          }
+        }
+      }
+    };
+
     if (restaurant.ownerUid === uid) {
       setActiveRole('OWNER');
+      try {
+        const ownerMemberDoc = await getDoc(doc(db, 'restaurants', restaurant.id, 'users', uid));
+        if (ownerMemberDoc.exists()) {
+          const uData = ownerMemberDoc.data() as RestaurantUser;
+          await syncMemberDisplayNameIfNewer(uData.name, uData.nameUpdatedAt);
+        }
+      } catch {
+        // Ignore non-fatal sync error for owner
+      }
       return;
     }
+
     try {
       const userMemberDoc = await getDoc(doc(db, 'restaurants', restaurant.id, 'users', uid));
       if (userMemberDoc.exists()) {
         const uData = userMemberDoc.data() as RestaurantUser;
         setActiveRole(uData.role);
+        await syncMemberDisplayNameIfNewer(uData.name, uData.nameUpdatedAt);
         return;
       }
 
@@ -320,6 +364,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (!authSnap.empty) {
           const authData = authSnap.docs[0].data() as StaffAuthorization;
           setActiveRole(authData.role);
+          await syncMemberDisplayNameIfNewer(authData.fullName, authData.nameUpdatedAt);
           return;
         }
       }
@@ -342,7 +387,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const refreshRestaurants = async () => {
     if (user && userProfile) {
-      await loadUserRestaurants(user.uid, userProfile.restaurantIds || []);
+      await loadUserRestaurants(user.uid, userProfile.restaurantIds || [], userProfile);
     }
   };
 
@@ -427,6 +472,149 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return allowedRoles.includes(activeRole);
   };
 
+  const updateOwnProfileName = async (
+    newName: string
+  ): Promise<{ success: boolean; normalizedName?: string; error?: string }> => {
+    const currentUser = auth.currentUser;
+    if (!currentUser) {
+      return { success: false, error: 'You must be signed in to update your profile name.' };
+    }
+
+    const validation = validateDisplayName(newName);
+    if (!validation.valid) {
+      return { success: false, error: validation.error || 'Please enter a valid display name.' };
+    }
+
+    const normalizedName = validation.normalized;
+    const previousName = userProfile?.name || currentUser.displayName || 'User';
+    if (previousName === normalizedName) {
+      return { success: true, normalizedName };
+    }
+
+    const now = new Date().toISOString();
+
+    try {
+      // 1. Update Firebase Auth display name
+      await updateProfile(currentUser, { displayName: normalizedName });
+
+      // 2. Update root /users/{uid} document (only name and nameUpdatedAt)
+      const rootUserRef = doc(db, 'users', currentUser.uid);
+      try {
+        await updateDoc(rootUserRef, {
+          name: normalizedName,
+          nameUpdatedAt: now,
+        });
+      } catch (rootErr) {
+        handleFirestoreError(rootErr, OperationType.UPDATE, `users/${currentUser.uid}`);
+      }
+
+      // 3. Propagate updated display name to all linked restaurant memberships & authorizations
+      const restaurantIdsToUpdate = Array.from(
+        new Set([
+          ...userRestaurants.map((r) => r.id),
+          ...(activeRestaurantId ? [activeRestaurantId] : []),
+          ...(userProfile?.restaurantIds || []),
+        ].filter(Boolean))
+      );
+
+      for (const rId of restaurantIdsToUpdate) {
+        try {
+          const memberRef = doc(db, 'restaurants', rId, 'users', currentUser.uid);
+          const memberSnap = await getDoc(memberRef);
+          if (memberSnap.exists()) {
+            await updateDoc(memberRef, {
+              name: normalizedName,
+              nameUpdatedAt: now,
+            });
+          }
+
+          // Also sync linked authorization record if present
+          const authByUidQuery = query(
+            collection(db, 'restaurants', rId, 'authorizations'),
+            where('attachedUid', '==', currentUser.uid),
+            limit(1)
+          );
+          const authByUidSnap = await getDocs(authByUidQuery);
+          if (!authByUidSnap.empty) {
+            await updateDoc(authByUidSnap.docs[0].ref, {
+              fullName: normalizedName,
+              nameUpdatedAt: now,
+            });
+          } else if (currentUser.email) {
+            const authByEmailQuery = query(
+              collection(db, 'restaurants', rId, 'authorizations'),
+              where('email', '==', currentUser.email.trim().toLowerCase()),
+              limit(1)
+            );
+            const authByEmailSnap = await getDocs(authByEmailQuery);
+            if (!authByEmailSnap.empty) {
+              await updateDoc(authByEmailSnap.docs[0].ref, {
+                fullName: normalizedName,
+                nameUpdatedAt: now,
+              });
+            }
+          }
+        } catch (tenantErr) {
+          console.error(`Failed updating member display name in restaurant ${rId}:`, tenantErr);
+        }
+      }
+
+      // 4. Write immutable audit log entry on the active restaurant
+      if (activeRestaurantId) {
+        try {
+          const auditRef = doc(collection(db, 'restaurants', activeRestaurantId, 'auditLogs'));
+          const auditEntry: AuditLog = {
+            id: auditRef.id,
+            actorUid: currentUser.uid,
+            actorName: normalizedName,
+            actorRole: activeRole || 'OWNER',
+            action: 'PROFILE_NAME_UPDATED',
+            entity: 'UserProfile',
+            entityId: currentUser.uid,
+            details: `User updated own display name from "${previousName}" to "${normalizedName}"`,
+            targetEmail: userProfile?.email || currentUser.email || '',
+            targetRole: activeRole || 'OWNER',
+            restaurantId: activeRestaurantId,
+            createdAt: now,
+          };
+          await setDoc(auditRef, auditEntry);
+        } catch (auditErr) {
+          console.error('Non-fatal audit log write failure during self profile update:', auditErr);
+        }
+      }
+
+      // 5. Update in-memory userProfile state immediately across Header, Profile, and Team views
+      setUserProfile((prev) =>
+        prev
+          ? {
+              ...prev,
+              name: normalizedName,
+              nameUpdatedAt: now,
+            }
+          : {
+              uid: currentUser.uid,
+              name: normalizedName,
+              nameUpdatedAt: now,
+              email: currentUser.email || '',
+              phone: currentUser.phoneNumber || '',
+              photoURL: currentUser.photoURL || '',
+              createdAt: now,
+              lastLoginAt: now,
+              accountStatus: 'active',
+              restaurantIds: restaurantIdsToUpdate,
+            }
+      );
+
+      return { success: true, normalizedName };
+    } catch (err) {
+      console.error('[updateOwnProfileName] Failed to update profile name:', err);
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : 'Unable to save display name. Please try again.',
+      };
+    }
+  };
+
   return (
     <AuthContext.Provider
       value={{
@@ -451,6 +639,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         switchRestaurant,
         refreshRestaurants,
         hasRole,
+        updateOwnProfileName,
       }}
     >
       {children}
