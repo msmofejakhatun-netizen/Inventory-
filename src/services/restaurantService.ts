@@ -793,7 +793,10 @@ export async function executeWastageTransaction(
 }
 
 /**
- * Physical Stock Count / Variance
+ * Physical Stock Count / Manual Current Stock Adjustment
+ * Atomic Firestore transaction that updates ONLY currentStock and updatedAt on the item,
+ * preserves UOM and valuation rates (averageStockRate, lastPurchaseRate, currentItemRate),
+ * never creates purchase or vendor payable records, and records immutable adjustment logs.
  */
 export async function executeStockAdjustmentTransaction(
   restaurantId: string,
@@ -805,66 +808,128 @@ export async function executeStockAdjustmentTransaction(
     reason: string;
     countedByUid: string;
     countedByName: string;
+    actorRole?: UserRole;
+    requireChange?: boolean;
   }
 ): Promise<string> {
+  if (!restaurantId || !restaurantId.trim()) {
+    throw new Error('Active restaurant context is required to adjust stock.');
+  }
+  if (!countData.itemId || !countData.itemId.trim()) {
+    throw new Error('Inventory item ID is required.');
+  }
+  if (!countData.countedByUid || !countData.countedByUid.trim()) {
+    throw new Error('Authenticated user identity is required to adjust stock.');
+  }
+
+  const parsedNewStock = Number(countData.physicalStock);
+  if (!Number.isFinite(parsedNewStock) || parsedNewStock < 0) {
+    throw new Error('Stock quantity must be a valid non-negative number (0 or greater).');
+  }
+  if (parsedNewStock > 1_000_000_000) {
+    throw new Error('Stock quantity exceeds the maximum allowed limit.');
+  }
+
+  const normalizedNewStock = Number(parsedNewStock.toFixed(2));
+  const trimmedReason = String(countData.reason ?? '').trim();
+  if (!trimmedReason) {
+    throw new Error('Adjustment reason is required.');
+  }
+  if (trimmedReason.length > 300) {
+    throw new Error('Adjustment reason must be 300 characters or fewer.');
+  }
+
   const countRef = doc(getTenantCol(restaurantId, 'stockCounts'));
   const countId = countRef.id;
   const now = new Date().toISOString();
+
+  class StockAdjustmentValidationError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = 'StockAdjustmentValidationError';
+    }
+  }
 
   try {
     await runTransaction(db, async (transaction) => {
       const itemRef = getTenantDoc(restaurantId, 'items', countData.itemId);
       const itemSnap = await transaction.get(itemRef);
       if (!itemSnap.exists()) {
-        throw new Error('Item not found');
+        throw new StockAdjustmentValidationError('Inventory item was not found.');
       }
-      const item = itemSnap.data() as Item;
-      const systemStock = item.currentStock || 0;
-      const varianceQuantity = Number((countData.physicalStock - systemStock).toFixed(2));
-      const rate = item.averageStockRate || item.lastPurchaseRate || 0;
-      const varianceValue = Number((varianceQuantity * rate).toFixed(2));
 
-      // Mandatory reason if variance exists
-      if (varianceQuantity !== 0 && (!countData.reason || countData.reason.trim().length === 0)) {
-        throw new Error('Reason is strictly mandatory when physical variance exists.');
+      const item = itemSnap.data() as Item;
+      if (item.restaurantId && item.restaurantId !== restaurantId) {
+        throw new StockAdjustmentValidationError('You do not have permission to edit stock for another restaurant.');
       }
+      if (item.status === 'inactive') {
+        throw new StockAdjustmentValidationError('Archived items cannot have their stock adjusted.');
+      }
+
+      // Always read live systemStock & UOM inside the transaction to prevent race conditions
+      // and ensure UOM is never altered during manual stock adjustment.
+      const systemStock = Number(Number(item.currentStock || 0).toFixed(2));
+      const itemUnit = item.unit || countData.unit;
+      const itemName = item.name || countData.itemName;
+      const varianceQuantity = Number((normalizedNewStock - systemStock).toFixed(2));
+
+      if (countData.requireChange && varianceQuantity === 0) {
+        throw new StockAdjustmentValidationError(
+          `Stock is already ${systemStock} ${itemUnit}. Enter a different quantity to save an adjustment.`
+        );
+      }
+
+      // Read-only reference to existing WAC / last purchase rate for variance value reporting only.
+      // Manual stock correction NEVER modifies averageStockRate, lastPurchaseRate, or currentItemRate.
+      const rate = Number(item.averageStockRate || item.lastPurchaseRate || 0);
+      const varianceValue = Number((varianceQuantity * rate).toFixed(2));
+      const adjustmentType: 'INCREASE' | 'DECREASE' | 'NO_CHANGE' =
+        varianceQuantity > 0 ? 'INCREASE' : varianceQuantity < 0 ? 'DECREASE' : 'NO_CHANGE';
 
       transaction.update(itemRef, {
-        currentStock: countData.physicalStock,
+        currentStock: normalizedNewStock,
         updatedAt: now,
       });
 
       const countDoc: StockCount = {
         id: countId,
         itemId: countData.itemId,
-        itemName: countData.itemName,
-        unit: countData.unit,
+        itemName,
+        unit: itemUnit,
         systemStock,
-        physicalStock: countData.physicalStock,
+        physicalStock: normalizedNewStock,
         varianceQuantity,
         varianceValue,
         rate,
-        reason: countData.reason,
+        reason: trimmedReason,
         countedByUid: countData.countedByUid,
         countedByName: countData.countedByName,
+        ...(countData.actorRole ? { actorRole: countData.actorRole } : {}),
+        adjustmentType,
         restaurantId,
         createdAt: now,
       };
       transaction.set(countRef, countDoc);
 
+      const signedDiff = `${varianceQuantity > 0 ? '+' : ''}${varianceQuantity}`;
       const txnRef = doc(getTenantCol(restaurantId, 'stockTransactions'));
       const txn: StockTransaction = {
         id: txnRef.id,
         itemId: countData.itemId,
-        itemName: countData.itemName,
+        itemName,
+        unit: itemUnit,
         type: 'PHYSICAL_ADJUSTMENT',
         quantity: varianceQuantity,
+        previousStock: systemStock,
+        newStock: normalizedNewStock,
         rate,
         value: Math.abs(varianceValue),
         staffUid: countData.countedByUid,
         staffName: countData.countedByName,
+        actorUid: countData.countedByUid,
+        actorName: countData.countedByName,
         referenceId: countId,
-        reason: `Physical Count: System ${systemStock} -> Physical ${countData.physicalStock} (Variance ${varianceQuantity}). ${countData.reason}`,
+        reason: `Stock Adjustment: ${systemStock} ${itemUnit} -> ${normalizedNewStock} ${itemUnit} (${signedDiff} ${itemUnit}). Reason: ${trimmedReason}`,
         restaurantId,
         createdAt: now,
       };
@@ -875,10 +940,11 @@ export async function executeStockAdjustmentTransaction(
         id: auditRef.id,
         actorUid: countData.countedByUid,
         actorName: countData.countedByName,
-        action: 'PHYSICAL_STOCK_ADJUSTMENT',
+        ...(countData.actorRole ? { actorRole: countData.actorRole } : {}),
+        action: countData.requireChange ? 'MANUAL_STOCK_ADJUSTMENT' : 'PHYSICAL_STOCK_ADJUSTMENT',
         entity: 'StockCount',
         entityId: countId,
-        details: `Audited ${countData.itemName}: System ${systemStock} vs Physical ${countData.physicalStock} (${varianceQuantity > 0 ? '+' : ''}${varianceQuantity} ${countData.unit}). Reason: ${countData.reason}`,
+        details: `Adjusted ${itemName}: ${systemStock} ${itemUnit} -> ${normalizedNewStock} ${itemUnit} (${signedDiff} ${itemUnit}). Reason: ${trimmedReason}`,
         restaurantId,
         createdAt: now,
       };
@@ -887,6 +953,9 @@ export async function executeStockAdjustmentTransaction(
 
     return countId;
   } catch (err) {
+    if (err instanceof StockAdjustmentValidationError) {
+      throw err;
+    }
     handleFirestoreError(err, OperationType.WRITE, `restaurants/${restaurantId}/stockCounts`);
   }
 }

@@ -199,8 +199,11 @@ export interface StockTransaction {
   id: string;
   itemId: string;
   itemName: string;
+  unit?: string;
   type: StockTransactionType;
   quantity: number; // positive for addition, negative or absolute for issue/wastage
+  previousStock?: number;
+  newStock?: number;
   rate: number;
   value: number;
   departmentId?: string;
@@ -300,6 +303,8 @@ export interface StockCount {
   reason: string;
   countedByUid: string;
   countedByName: string;
+  actorRole?: UserRole;
+  adjustmentType?: 'INCREASE' | 'DECREASE' | 'NO_CHANGE';
   restaurantId: string;
   createdAt: string;
 }

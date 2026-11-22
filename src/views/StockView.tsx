@@ -14,6 +14,8 @@ import {
   Archive,
   X,
   Loader2,
+  SlidersHorizontal,
+  History,
 } from 'lucide-react';
 import {
   collection,
@@ -22,10 +24,13 @@ import {
   setDoc,
   updateDoc,
   writeBatch,
+  query,
+  orderBy,
+  limit,
 } from 'firebase/firestore';
 import { db } from '../firebase/config';
 import { useAuth } from '../context/AuthContext';
-import { Item, Department, Vendor, Issue } from '../types';
+import { Item, Department, Vendor, Issue, StockCount } from '../types';
 import {
   calculateStockValue,
   calculateAverageDailyConsumption,
@@ -40,6 +45,14 @@ import {
 } from '../services/restaurantService';
 import { Modal } from '../components/common/Modal';
 import { Badge } from '../components/common/Badge';
+import {
+  EditStockModal,
+  StockAdjustmentSuccessPayload,
+} from '../components/inventory/EditStockModal';
+import {
+  formatSignedStockDifference,
+  formatStockQuantity,
+} from '../utils/stockAdjustment';
 import {
   UNIT_OF_MEASURE_OPTIONS,
   isSupportedUnit,
@@ -66,6 +79,8 @@ export const StockView: React.FC = () => {
 
   // RBAC: Owner & Manager follow inventory management permissions; Storekeeper & Dept Staff cannot delete
   const canManageInventory = hasRole(['OWNER', 'MANAGER']);
+  // RBAC: Owner, Manager, and Storekeeper can perform auditable stock quantity adjustments (matches Firestore rules)
+  const canAdjustStock = hasRole(['OWNER', 'MANAGER', 'STOREKEEPER']);
 
   // Filters
   const [searchQuery, setSearchQuery] = useState('');
@@ -76,6 +91,11 @@ export const StockView: React.FC = () => {
   // Add / Edit Modal
   const [isItemModalOpen, setIsItemModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<Item | null>(null);
+
+  // Edit Current Stock Modal & Adjustment History
+  const [adjustingStockItemId, setAdjustingStockItemId] = useState<string | null>(null);
+  const [stockAdjustments, setStockAdjustments] = useState<StockCount[]>([]);
+  const [adjustmentHistorySearch, setAdjustmentHistorySearch] = useState('');
 
   // View Item Modal
   const [viewingItem, setViewingItem] = useState<(Item & { stockValue: number; stockDaysLabel: string; statusType: string }) | null>(null);
@@ -139,6 +159,8 @@ export const StockView: React.FC = () => {
     setOpenMenu(null);
     setDeleteNotice(null);
     setSaveSuccessNotice(null);
+    setAdjustingStockItemId(null);
+    setAdjustmentHistorySearch('');
   }, [activeRestaurantId]);
 
   useEffect(() => {
@@ -161,13 +183,65 @@ export const StockView: React.FC = () => {
       setIssues(snap.docs.map((d) => d.data() as Issue));
     });
 
+    let unsubStockCounts: (() => void) | undefined;
+    if (canAdjustStock) {
+      unsubStockCounts = onSnapshot(
+        query(
+          collection(db, 'restaurants', activeRestaurantId, 'stockCounts'),
+          orderBy('createdAt', 'desc'),
+          limit(50)
+        ),
+        (snap) => {
+          setStockAdjustments(snap.docs.map((d) => d.data() as StockCount));
+        }
+      );
+    } else {
+      setStockAdjustments([]);
+    }
+
     return () => {
       unsubItems();
       unsubDepts();
       unsubVendors();
       unsubIssues();
+      if (unsubStockCounts) unsubStockCounts();
     };
-  }, [activeRestaurantId]);
+  }, [activeRestaurantId, canAdjustStock]);
+
+  const liveAdjustingItem = useMemo(
+    () => (adjustingStockItemId ? items.find((i) => i.id === adjustingStockItemId) || null : null),
+    [adjustingStockItemId, items]
+  );
+
+  const filteredStockAdjustments = useMemo(() => {
+    const q = adjustmentHistorySearch.trim().toLowerCase();
+    if (!q) return stockAdjustments;
+    return stockAdjustments.filter(
+      (adj) =>
+        (adj.itemName || '').toLowerCase().includes(q) ||
+        (adj.reason || '').toLowerCase().includes(q) ||
+        (adj.countedByName || '').toLowerCase().includes(q) ||
+        (adj.unit || '').toLowerCase().includes(q)
+    );
+  }, [stockAdjustments, adjustmentHistorySearch]);
+
+  const handleOpenEditStock = (item: Item) => {
+    if (!canAdjustStock || item.status === 'inactive') return;
+    setOpenMenu(null);
+    setAdjustingStockItemId(item.id);
+  };
+
+  const handleStockAdjustmentSuccess = (result: StockAdjustmentSuccessPayload) => {
+    const signedDiff = formatSignedStockDifference(result.difference);
+    setSaveSuccessNotice(
+      `Stock updated for ${result.itemName}: ${formatStockQuantity(result.previousStock)} ${result.unit} → ${formatStockQuantity(result.newStock)} ${result.unit} (${signedDiff} ${result.unit}). Reason: ${result.reason}`
+    );
+    window.setTimeout(() => {
+      setSaveSuccessNotice((prev) =>
+        prev && prev.includes(result.itemName) ? null : prev
+      );
+    }, 7000);
+  };
 
   // Close action dropdown on outside click, escape, or scroll
   useEffect(() => {
@@ -1036,15 +1110,29 @@ export const StockView: React.FC = () => {
                         )}
                       </td>
                       <td className="py-3 px-4 text-center">
-                        <button
-                          id={`item-action-menu-btn-${item.id}`}
-                          type="button"
-                          aria-label={`Actions for ${item.name}`}
-                          onClick={(e) => handleOpenActionMenu(e, item.id)}
-                          className="p-1.5 text-stone-500 hover:text-stone-900 hover:bg-stone-100 rounded-lg transition-colors"
-                        >
-                          <MoreVertical className="w-4 h-4" />
-                        </button>
+                        <div className="inline-flex items-center justify-center gap-1">
+                          {canAdjustStock && !isArchived && (
+                            <button
+                              id={`quick-edit-stock-btn-${item.id}`}
+                              type="button"
+                              onClick={() => handleOpenEditStock(item)}
+                              title={`Edit current stock for ${item.name}`}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[#0D2149]/20 bg-[#0D2149]/5 hover:bg-[#0D2149] text-[#0D2149] hover:text-white text-[11px] font-semibold transition-colors whitespace-nowrap"
+                            >
+                              <SlidersHorizontal className="w-3 h-3" />
+                              <span>Edit Stock</span>
+                            </button>
+                          )}
+                          <button
+                            id={`item-action-menu-btn-${item.id}`}
+                            type="button"
+                            aria-label={`Actions for ${item.name}`}
+                            onClick={(e) => handleOpenActionMenu(e, item.id)}
+                            className="p-1.5 text-stone-500 hover:text-stone-900 hover:bg-stone-100 rounded-lg transition-colors"
+                          >
+                            <MoreVertical className="w-4 h-4" />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -1168,33 +1256,215 @@ export const StockView: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between pt-1">
+                <div className="flex items-center justify-between gap-2 pt-1">
                   <span className="text-[11px] font-mono text-stone-500">
                     Days: {item.stockDaysLabel}
                   </span>
-                  {isArchived ? (
-                    <Badge variant="neutral" size="sm">
-                      Archived
-                    </Badge>
-                  ) : item.statusType === 'LOW' ? (
-                    <Badge variant="danger" size="sm">
-                      Low Stock
-                    </Badge>
-                  ) : item.statusType === 'EXCESS' ? (
-                    <Badge variant="warning" size="sm">
-                      Excess Stock
-                    </Badge>
-                  ) : (
-                    <Badge variant="success" size="sm">
-                      Sufficient
-                    </Badge>
-                  )}
+                  <div className="flex items-center gap-2">
+                    {canAdjustStock && !isArchived && (
+                      <button
+                        id={`mobile-quick-edit-stock-btn-${item.id}`}
+                        type="button"
+                        onClick={() => handleOpenEditStock(item)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[#0D2149]/20 bg-[#0D2149]/5 hover:bg-[#0D2149] text-[#0D2149] hover:text-white text-[11px] font-semibold transition-colors"
+                      >
+                        <SlidersHorizontal className="w-3 h-3" />
+                        <span>Edit Stock</span>
+                      </button>
+                    )}
+                    {isArchived ? (
+                      <Badge variant="neutral" size="sm">
+                        Archived
+                      </Badge>
+                    ) : item.statusType === 'LOW' ? (
+                      <Badge variant="danger" size="sm">
+                        Low Stock
+                      </Badge>
+                    ) : item.statusType === 'EXCESS' ? (
+                      <Badge variant="warning" size="sm">
+                        Excess Stock
+                      </Badge>
+                    ) : (
+                      <Badge variant="success" size="sm">
+                        Sufficient
+                      </Badge>
+                    )}
+                  </div>
                 </div>
               </div>
             );
           })
         )}
       </div>
+
+      {/* Stock Adjustment History (Visible to authorized users: Owner, Manager, Storekeeper) */}
+      {canAdjustStock && (
+        <section
+          id="stock-adjustment-history-section"
+          className="bg-white rounded-xl border border-stone-200 shadow-2xs overflow-hidden"
+        >
+          <div className="p-4 sm:p-5 border-b border-stone-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-stone-50/50">
+            <div className="flex items-start gap-2.5">
+              <div className="p-2 rounded-lg bg-[#0D2149] text-white shrink-0">
+                <History className="w-4 h-4 text-[#FF5A1F]" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h2 className="text-sm font-bold text-[#0D2149]">Stock Adjustment History</h2>
+                  <span className="px-2 py-0.5 rounded-md bg-stone-200/80 text-stone-700 text-[10px] font-bold">
+                    {filteredStockAdjustments.length} {filteredStockAdjustments.length === 1 ? 'record' : 'records'}
+                  </span>
+                </div>
+                <p className="text-[11px] text-stone-500 mt-0.5">
+                  Immutable audit log of manual stock corrections and physical counts. Valuation rates and vendor payables are unaffected.
+                </p>
+              </div>
+            </div>
+
+            <div className="relative w-full sm:w-64">
+              <Search className="w-3.5 h-3.5 text-stone-400 absolute left-3 top-2.5" />
+              <input
+                id="stock-adjustment-history-search"
+                type="text"
+                placeholder="Search item, reason, or user..."
+                value={adjustmentHistorySearch}
+                onChange={(e) => setAdjustmentHistorySearch(e.target.value)}
+                className="w-full pl-8 pr-3 py-1.5 text-xs border border-stone-300 rounded-lg bg-white focus:outline-none focus:border-[#0D2149]"
+              />
+            </div>
+          </div>
+
+          {filteredStockAdjustments.length === 0 ? (
+            <div className="p-8 text-center text-xs text-stone-400">
+              {stockAdjustments.length === 0
+                ? 'No stock adjustments recorded yet. Use "Edit Stock" on any inventory item to record a manual correction.'
+                : 'No stock adjustments match your search filter.'}
+            </div>
+          ) : (
+            <>
+              {/* Desktop History Table */}
+              <div className="hidden md:block overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-stone-200 bg-stone-50/70 text-[11px] font-semibold text-stone-500 uppercase tracking-wider">
+                      <th className="py-2.5 px-4">Date &amp; Time</th>
+                      <th className="py-2.5 px-4">Item</th>
+                      <th className="py-2.5 px-4 text-right">Previous</th>
+                      <th className="py-2.5 px-4 text-right">New Stock</th>
+                      <th className="py-2.5 px-4 text-right">Difference</th>
+                      <th className="py-2.5 px-4">Reason</th>
+                      <th className="py-2.5 px-4">Adjusted By</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-stone-100 text-xs">
+                    {filteredStockAdjustments.map((adj) => {
+                      const isInc = adj.varianceQuantity > 0;
+                      const isDec = adj.varianceQuantity < 0;
+                      return (
+                        <tr key={adj.id} className="hover:bg-stone-50/60 transition-colors">
+                          <td className="py-3 px-4 text-stone-500 whitespace-nowrap font-mono text-[11px]">
+                            {new Date(adj.createdAt).toLocaleString()}
+                          </td>
+                          <td className="py-3 px-4 font-semibold text-stone-900">
+                            {adj.itemName}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono text-stone-600 whitespace-nowrap">
+                            {formatStockQuantity(adj.systemStock)} {adj.unit}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono font-bold text-stone-900 whitespace-nowrap">
+                            {formatStockQuantity(adj.physicalStock)} {adj.unit}
+                          </td>
+                          <td className="py-3 px-4 text-right whitespace-nowrap">
+                            <span
+                              className={`inline-block px-2 py-0.5 rounded font-mono font-bold text-[11px] ${
+                                isInc
+                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                  : isDec
+                                  ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                                  : 'bg-stone-100 text-stone-600 border border-stone-200'
+                              }`}
+                            >
+                              {formatSignedStockDifference(adj.varianceQuantity)} {adj.unit}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 text-stone-700 max-w-xs">
+                            <span className="line-clamp-2" title={adj.reason}>
+                              {adj.reason}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 text-stone-600 whitespace-nowrap">
+                            <div className="font-medium text-stone-800">{adj.countedByName}</div>
+                            {adj.actorRole && (
+                              <span className="text-[10px] uppercase tracking-wide text-stone-400">
+                                {adj.actorRole.replace('_', ' ')}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Mobile History Cards */}
+              <div className="md:hidden divide-y divide-stone-100">
+                {filteredStockAdjustments.map((adj) => {
+                  const isInc = adj.varianceQuantity > 0;
+                  const isDec = adj.varianceQuantity < 0;
+                  return (
+                    <div key={adj.id} className="p-4 space-y-2 text-xs">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="font-bold text-stone-900 truncate">{adj.itemName}</p>
+                          <p className="text-[10px] font-mono text-stone-400 mt-0.5">
+                            {new Date(adj.createdAt).toLocaleString()}
+                          </p>
+                        </div>
+                        <span
+                          className={`px-2 py-0.5 rounded font-mono font-bold text-[11px] shrink-0 ${
+                            isInc
+                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                              : isDec
+                              ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                              : 'bg-stone-100 text-stone-600 border border-stone-200'
+                          }`}
+                        >
+                          {formatSignedStockDifference(adj.varianceQuantity)} {adj.unit}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 p-2.5 rounded-lg bg-stone-50 border border-stone-100">
+                        <div>
+                          <span className="text-[10px] uppercase text-stone-400 block">Previous</span>
+                          <span className="font-mono font-semibold text-stone-700">
+                            {formatStockQuantity(adj.systemStock)} {adj.unit}
+                          </span>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-[10px] uppercase text-stone-400 block">New Stock</span>
+                          <span className="font-mono font-bold text-stone-900">
+                            {formatStockQuantity(adj.physicalStock)} {adj.unit}
+                          </span>
+                        </div>
+                      </div>
+
+                      <p className="text-stone-700 leading-relaxed">
+                        <span className="font-semibold text-stone-500">Reason: </span>
+                        {adj.reason}
+                      </p>
+                      <p className="text-[11px] text-stone-500">
+                        By <span className="font-semibold text-stone-700">{adj.countedByName}</span>
+                        {adj.actorRole ? ` (${adj.actorRole.replace('_', ' ')})` : ''}
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </section>
+      )}
 
       {/* Fixed Floating Row Action Menu (View Item / Edit Item / Delete Item) */}
       {openMenu && openMenuItem && (
@@ -1221,6 +1491,18 @@ export const StockView: React.FC = () => {
             <Eye className="w-3.5 h-3.5 text-stone-500" />
             <span>View Item</span>
           </button>
+
+          {canAdjustStock && openMenuItem.status !== 'inactive' && (
+            <button
+              id={`action-edit-stock-${openMenuItem.id}`}
+              type="button"
+              onClick={() => handleOpenEditStock(openMenuItem)}
+              className="w-full text-left px-3 py-2 text-[#0D2149] hover:bg-slate-50 flex items-center gap-2 font-semibold"
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5 text-[#FF5A1F]" />
+              <span>Edit Stock</span>
+            </button>
+          )}
 
           {canManageInventory && (
             <>
@@ -1337,7 +1619,22 @@ export const StockView: React.FC = () => {
                 </div>
               </div>
 
-              <div className="flex justify-end gap-2">
+              <div className="flex flex-wrap justify-end gap-2">
+                {canAdjustStock && liveViewingItem.status !== 'inactive' && (
+                  <button
+                    id="view-modal-edit-stock-btn"
+                    type="button"
+                    onClick={() => {
+                      const target = liveViewingItem;
+                      setViewingItem(null);
+                      handleOpenEditStock(target);
+                    }}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#FF5A1F] hover:bg-[#e24c16] text-white font-bold shadow-xs transition-colors"
+                  >
+                    <SlidersHorizontal className="w-3.5 h-3.5" />
+                    <span>Edit Stock</span>
+                  </button>
+                )}
                 {canManageInventory && (
                   <button
                     type="button"
@@ -1797,6 +2094,17 @@ export const StockView: React.FC = () => {
           </div>
         </div>
       </Modal>
+      {/* Edit Current Stock Modal */}
+      <EditStockModal
+        isOpen={Boolean(liveAdjustingItem)}
+        item={liveAdjustingItem}
+        restaurantId={activeRestaurantId}
+        actorUid={user?.uid || ''}
+        actorName={userProfile?.name || user?.displayName || user?.email || 'Authorized User'}
+        actorRole={activeRole}
+        onClose={() => setAdjustingStockItemId(null)}
+        onSuccess={handleStockAdjustmentSuccess}
+      />
     </div>
   );
 };

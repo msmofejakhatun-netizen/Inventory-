@@ -274,10 +274,16 @@ service cloud.firestore {
         allow create: if isStorekeeper(restaurantId) && (
           !('currentItemRate' in request.resource.data) ||
           (request.resource.data.currentItemRate is number && request.resource.data.currentItemRate >= 0)
+        ) && (
+          !('currentStock' in request.resource.data) ||
+          (request.resource.data.currentStock is number && request.resource.data.currentStock >= 0)
         );
         allow update: if (
           !('currentItemRate' in request.resource.data) ||
           (request.resource.data.currentItemRate is number && request.resource.data.currentItemRate >= 0)
+        ) && (
+          !('currentStock' in request.resource.data) ||
+          (request.resource.data.currentStock is number && request.resource.data.currentStock >= 0)
         ) && (
           isRestaurantManager(restaurantId) || (
             isStorekeeper(restaurantId) &&
@@ -330,11 +336,25 @@ service cloud.firestore {
         allow delete: if isRestaurantOwner(restaurantId);
       }
 
-      // Stock counts (physical audit & variance)
+      // Stock counts & manual stock adjustments (append-only immutable audit history)
       match /stockCounts/{countId} {
         allow get, list: if isMemberOfRestaurant(restaurantId);
-        allow create, update: if isStorekeeper(restaurantId);
-        allow delete: if isRestaurantOwner(restaurantId);
+        allow create: if isStorekeeper(restaurantId) &&
+          request.resource.data.restaurantId == restaurantId &&
+          request.resource.data.countedByUid == request.auth.uid &&
+          request.resource.data.itemId is string &&
+          request.resource.data.itemId.size() > 0 &&
+          request.resource.data.unit is string &&
+          request.resource.data.unit.size() > 0 &&
+          request.resource.data.unit.size() <= 30 &&
+          request.resource.data.systemStock is number &&
+          request.resource.data.physicalStock is number &&
+          request.resource.data.physicalStock >= 0 &&
+          request.resource.data.varianceQuantity is number &&
+          request.resource.data.reason is string &&
+          request.resource.data.reason.trim().size() > 0 &&
+          request.resource.data.reason.size() <= 300;
+        allow update, delete: if false; // Immutable adjustment history
       }
 
       // Vendor Payments
