@@ -96,10 +96,11 @@ export const PhysicalAuditView: React.FC = () => {
   });
 
   const handleExportCsv = () => {
-    const headers = ['Date', 'Item Name', 'System Stock', 'Physical Count', 'Variance Qty', 'Variance Value', 'Auditor'];
+    const headers = ['Date', 'Item Name', 'Unit', 'System Stock', 'Physical Count', 'Variance Qty', 'Variance Value', 'Auditor'];
     const rows = adjustments.map((a) => [
       new Date(a.createdAt).toLocaleString(),
       a.itemName,
+      a.unit || '',
       a.systemStock,
       a.physicalStock,
       a.varianceQuantity,
@@ -245,11 +246,16 @@ export const PhysicalAuditView: React.FC = () => {
                       })}
                     </td>
                     <td className="py-2.5 px-4 font-semibold text-stone-900">{a.itemName}</td>
-                    <td className="py-2.5 px-4 text-right">{a.systemStock}</td>
-                    <td className="py-2.5 px-4 text-right font-bold text-stone-900">{a.physicalStock}</td>
+                    <td className="py-2.5 px-4 text-right">
+                      {a.systemStock} {a.unit && <span className="text-[10px] text-stone-500">{a.unit}</span>}
+                    </td>
+                    <td className="py-2.5 px-4 text-right font-bold text-stone-900">
+                      {a.physicalStock} {a.unit && <span className="text-[10px] font-normal text-stone-500">{a.unit}</span>}
+                    </td>
                     <td className="py-2.5 px-4 text-right font-bold">
                       <span className={a.varianceQuantity < 0 ? 'text-rose-700' : 'text-emerald-700'}>
                         {a.varianceQuantity > 0 ? `+${a.varianceQuantity}` : a.varianceQuantity}
+                        {a.unit ? ` ${a.unit}` : ''}
                       </span>
                     </td>
                     <td className="py-2.5 px-4 text-right font-bold">

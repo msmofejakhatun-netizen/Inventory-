@@ -118,6 +118,7 @@ export const FifteenDayPlannerView: React.FC = () => {
     const headers = [
       'Item Name',
       'Category',
+      'Unit',
       'Current Stock',
       'Daily Consumption',
       '15-Day Need',
@@ -130,6 +131,7 @@ export const FifteenDayPlannerView: React.FC = () => {
     const rows = filteredItems.map((p) => [
       p.itemName,
       p.category,
+      p.unit,
       p.currentStock,
       p.averageDailyConsumption,
       p.estimatedRequirement15Days,

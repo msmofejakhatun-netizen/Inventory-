@@ -40,6 +40,11 @@ import {
 } from '../services/restaurantService';
 import { Modal } from '../components/common/Modal';
 import { Badge } from '../components/common/Badge';
+import {
+  UNIT_OF_MEASURE_OPTIONS,
+  isSupportedUnit,
+  normalizeImportedUnit,
+} from '../utils/units';
 
 interface DeleteFeedbackNotice {
   variant: 'success' | 'warning' | 'error';
@@ -628,7 +633,7 @@ export const StockView: React.FC = () => {
             id: itemRef.id,
             name: itemName,
             category: itemCat || 'General',
-            unit: itemUnit || 'Kg',
+            unit: normalizeImportedUnit(itemUnit),
             currentStock: Number(currentQty) || 0,
             averageStockRate: Number(avgRate) || 0,
             lastPurchaseRate: Number(avgRate) || 0,
@@ -1530,22 +1535,26 @@ export const StockView: React.FC = () => {
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>
-              <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1">
+              <label
+                htmlFor="item-unit-select"
+                className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1"
+              >
                 Unit of Measure
               </label>
               <select
+                id="item-unit-select"
                 value={unit}
                 onChange={(e) => setUnit(e.target.value)}
                 className="w-full px-3 py-2 text-xs border border-stone-300 rounded-lg bg-white"
               >
-                <option value="Kg">Kg</option>
-                <option value="Ltr">Ltr</option>
-                <option value="Gm">Gm</option>
-                <option value="Ml">Ml</option>
-                <option value="Pcs">Pcs</option>
-                <option value="Box">Box</option>
-                <option value="Tin">Tin</option>
-                <option value="Bottle">Bottle</option>
+                {UNIT_OF_MEASURE_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+                {unit && !isSupportedUnit(unit) && (
+                  <option value={unit}>{unit}</option>
+                )}
               </select>
             </div>
             <div>
@@ -1694,7 +1703,7 @@ export const StockView: React.FC = () => {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-3 bg-stone-50 rounded-lg border border-stone-200">
               <div>
                 <label className="block text-xs font-bold text-stone-700 uppercase tracking-wider mb-1">
-                  Opening Stock Quantity
+                  Opening Stock Quantity ({unit})
                 </label>
                 <input
                   type="number"
