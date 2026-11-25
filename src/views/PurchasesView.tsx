@@ -12,6 +12,8 @@ import {
   CheckCircle2,
   Download,
   Info,
+  Eye,
+  Printer,
 } from 'lucide-react';
 import { collection, onSnapshot, query, orderBy, limit } from 'firebase/firestore';
 import { db } from '../firebase/config';
@@ -28,7 +30,7 @@ import {
   executeVendorPaymentTransaction,
   reconcilePaymentWithPurchase,
 } from '../services/restaurantService';
-import { exportToPdf, exportToCsv } from '../services/exportService';
+import { exportToPdf, exportToCsv, exportInwardPurchaseBillPdf } from '../services/exportService';
 import { Modal } from '../components/common/Modal';
 import { Badge } from '../components/common/Badge';
 
@@ -51,7 +53,6 @@ export const PurchasesView: React.FC = () => {
       itemId: string;
       quantity: number;
       rate: number;
-      taxPercent: number;
     }[]
   >([]);
 
@@ -60,6 +61,9 @@ export const PurchasesView: React.FC = () => {
   const [overrideReason, setOverrideReason] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+
+  // Inward Purchase Details Modal state
+  const [viewingPurchase, setViewingPurchase] = useState<Purchase | null>(null);
 
   // Bill Payment Modal state
   const [payingPurchase, setPayingPurchase] = useState<Purchase | null>(null);
@@ -116,7 +120,7 @@ export const PurchasesView: React.FC = () => {
     setBillNumber('');
     setBillDate(new Date().toISOString().slice(0, 10));
     setSelectedVendorId(vendors[0]?.id || '');
-    setRows([{ itemId: items[0]?.id || '', quantity: 1, rate: items[0]?.lastPurchaseRate || 0, taxPercent: 5 }]);
+    setRows([{ itemId: items[0]?.id || '', quantity: 1, rate: items[0]?.lastPurchaseRate || 0 }]);
     setIsOverride(false);
     setOverrideReason('');
     setFormError(null);
@@ -131,7 +135,6 @@ export const PurchasesView: React.FC = () => {
         itemId: firstItem?.id || '',
         quantity: 1,
         rate: firstItem?.lastPurchaseRate || 0,
-        taxPercent: 5,
       },
     ]);
   };
@@ -182,8 +185,9 @@ export const PurchasesView: React.FC = () => {
       unit: item?.unit || 'Unit',
       quantity: qty,
       rate: currentRate,
-      taxPercent: Number(r.taxPercent) || 0,
+      purchaseRate: currentRate,
       total: Number((qty * currentRate).toFixed(2)),
+      amount: Number((qty * currentRate).toFixed(2)),
       previousRate: prevRate,
       priceHikeAbsolute: Number(hikeAbs.toFixed(2)),
       priceHikePercent: hikePct,
@@ -194,9 +198,9 @@ export const PurchasesView: React.FC = () => {
     };
   });
 
-  const totalAmount = analyzedRows.reduce((sum, r) => sum + r.total, 0);
-  const taxAmount = analyzedRows.reduce((sum, r) => sum + (r.total * r.taxPercent) / 100, 0);
-  const netAmount = Number((totalAmount + taxAmount).toFixed(2));
+  // Strictly tax-free calculation: Line Amount = Received Qty x Actual Rate, Grand Total = Sum of Line Amounts
+  const totalAmount = Number(analyzedRows.reduce((sum, r) => sum + r.total, 0).toFixed(2));
+  const grandTotal = totalAmount;
 
   // Determine if any item triggers the Purchase Protection safeguard
   const hasAboveTargetItems = analyzedRows.some((r) => r.isAboveTarget);
@@ -238,9 +242,8 @@ export const PurchasesView: React.FC = () => {
           billDate,
           vendorId: selectedVendorId,
           vendorName: vendorObj?.name || 'Vendor',
-          totalAmount,
-          taxAmount,
-          netAmount,
+          totalAmount: grandTotal,
+          netAmount: grandTotal,
           paymentStatus: 'unpaid',
           isOverride,
           overrideReason: isOverride ? overrideReason.trim() : undefined,
@@ -352,7 +355,7 @@ export const PurchasesView: React.FC = () => {
       'Bill Date',
       'Vendor',
       'Items Count',
-      'Net Amount',
+      'Total Amount',
       'Paid Amount',
       'Remaining Balance',
       'Payment Status',
@@ -379,14 +382,15 @@ export const PurchasesView: React.FC = () => {
   const handleExportPdf = () => {
     const fmt = (n: number) =>
       `${currencySymbol}${(Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-    const headers = ['Bill #', 'PO #', 'Date', 'Vendor', 'Items', 'Net Amount', 'Paid', 'Due', 'Status'];
-    let totalNet = 0;
+    const headers = ['Bill #', 'PO #', 'Date', 'Vendor', 'Items', 'Total Amount', 'Paid', 'Due', 'Status'];
+    let totalInward = 0;
     let totalPaid = 0;
     let totalDue = 0;
 
     const rows = filteredPurchases.map((p) => {
       const payInfo = getPurchasePaymentInfo(p);
-      totalNet += Number(p.netAmount) || 0;
+      const amount = Number(p.netAmount) || 0;
+      totalInward += amount;
       totalPaid += Number(payInfo.paidAmount) || 0;
       totalDue += Number(payInfo.remainingAmount) || 0;
       return [
@@ -395,7 +399,7 @@ export const PurchasesView: React.FC = () => {
         p.billDate,
         p.vendorName,
         p.itemsCount,
-        fmt(p.netAmount),
+        fmt(amount),
         fmt(payInfo.paidAmount),
         fmt(payInfo.remainingAmount),
         payInfo.displayStatus,
@@ -412,20 +416,20 @@ export const PurchasesView: React.FC = () => {
         { header: 'Date', weight: 1.1, align: 'left' },
         { header: 'Vendor', weight: 1.85, align: 'left', isBold: true },
         { header: 'Items', weight: 0.6, align: 'center' },
-        { header: 'Net\nAmount', weight: 1.25, align: 'right', isBold: true },
+        { header: 'Total\nAmount', weight: 1.25, align: 'right', isBold: true },
         { header: 'Paid', weight: 1.2, align: 'right' },
         { header: 'Due', weight: 1.2, align: 'right', isBold: true },
         { header: 'Status', weight: 1.35, align: 'center', isStatusBadge: true },
       ],
       summaryCards: [
         { label: 'Total Invoices', value: String(filteredPurchases.length), accent: 'navy' },
-        { label: 'Total Inward Value', value: fmt(totalNet), accent: 'navy' },
+        { label: 'Total Inward Value', value: fmt(totalInward), accent: 'navy' },
         { label: 'Total Paid', value: fmt(totalPaid), accent: 'green' },
         { label: 'Outstanding Due', value: fmt(totalDue), accent: totalDue > 0 ? 'red' : 'green' },
       ],
       totalsRow:
         rows.length > 0
-          ? ['', '', '', `TOTAL (${rows.length} Bills)`, '', fmt(totalNet), fmt(totalPaid), fmt(totalDue), '']
+          ? ['', '', '', `TOTAL (${rows.length} Bills)`, '', fmt(totalInward), fmt(totalPaid), fmt(totalDue), '']
           : undefined,
     });
   };
@@ -508,7 +512,7 @@ export const PurchasesView: React.FC = () => {
                 <th className="py-3 px-4">Bill Date</th>
                 <th className="py-3 px-4">Vendor</th>
                 <th className="py-3 px-4">Items Included</th>
-                <th className="py-3 px-4 text-right">Net Amount</th>
+                <th className="py-3 px-4 text-right">Total Amount</th>
                 <th className="py-3 px-4">Payment Status</th>
                 <th className="py-3 px-4">Safeguard Override</th>
                 <th className="py-3 px-4">Recorded By</th>
@@ -563,7 +567,7 @@ export const PurchasesView: React.FC = () => {
                         {p.items?.map((i) => `${i.itemName} (${i.quantity} ${i.unit})`).join(', ') || `${p.itemsCount} items`}
                       </td>
                       <td className="py-3 px-4 text-right font-bold text-stone-900">
-                        {currencySymbol}{p.netAmount.toFixed(2)}
+                        {currencySymbol}{(Number(p.netAmount) || 0).toFixed(2)}
                       </td>
                       <td className="py-3 px-4">
                         <div className="flex flex-col items-start gap-0.5">
@@ -598,17 +602,43 @@ export const PurchasesView: React.FC = () => {
                       </td>
                       <td className="py-3 px-4 text-stone-500 text-[11px]">{p.recordedByName}</td>
                       <td className="py-3 px-4 text-right">
-                        {payInfo.status !== 'PAID' ? (
+                        <div className="inline-flex items-center justify-end gap-1.5">
                           <button
-                            id={`pay-bill-${p.billNumber}`}
-                            onClick={() => openPayModal(p)}
-                            className="px-2.5 py-1 text-[11px] font-semibold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 rounded-md border border-emerald-200 transition-colors"
+                            type="button"
+                            onClick={() => setViewingPurchase(p)}
+                            className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold bg-stone-50 text-stone-700 hover:bg-stone-100 rounded-md border border-stone-200 transition-colors"
+                            title="View Inward Purchase Details"
                           >
-                            Pay Bill
+                            <Eye className="w-3 h-3" /> Details
                           </button>
-                        ) : (
-                          <span className="text-[11px] text-emerald-700 font-medium">Paid</span>
-                        )}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              exportInwardPurchaseBillPdf(
+                                p,
+                                activeRestaurant?.name || 'Restaurant',
+                                currencySymbol,
+                                activeRestaurant?.address,
+                                activeRestaurant?.timezone
+                              )
+                            }
+                            className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold bg-stone-50 text-stone-700 hover:bg-stone-100 rounded-md border border-stone-200 transition-colors"
+                            title="Download Inward Purchase PDF"
+                          >
+                            <Printer className="w-3 h-3" /> PDF
+                          </button>
+                          {payInfo.status !== 'PAID' ? (
+                            <button
+                              id={`pay-bill-${p.billNumber}`}
+                              onClick={() => openPayModal(p)}
+                              className="px-2.5 py-1 text-[11px] font-semibold bg-emerald-50 text-emerald-700 hover:bg-emerald-100 rounded-md border border-emerald-200 transition-colors"
+                            >
+                              Pay Bill
+                            </button>
+                          ) : (
+                            <span className="text-[11px] text-emerald-700 font-medium px-1">Paid</span>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -702,8 +732,8 @@ export const PurchasesView: React.FC = () => {
                     key={idx}
                     className="p-3 rounded-lg border border-stone-200 bg-white space-y-2 text-xs shadow-2xs"
                   >
-                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
-                      <div className="sm:col-span-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-center">
+                      <div className="sm:col-span-5">
                         <label className="text-[10px] text-stone-500 font-semibold uppercase block mb-1">
                           Item
                         </label>
@@ -722,7 +752,7 @@ export const PurchasesView: React.FC = () => {
 
                       <div className="sm:col-span-2">
                         <label className="text-[10px] text-stone-500 font-semibold uppercase block mb-1">
-                          Qty ({analyzed.unit})
+                          Recv Qty ({analyzed.unit})
                         </label>
                         <input
                           type="number"
@@ -736,7 +766,7 @@ export const PurchasesView: React.FC = () => {
 
                       <div className="sm:col-span-2">
                         <label className="text-[10px] text-stone-500 font-semibold uppercase block mb-1">
-                          Rate ({currencySymbol})
+                          Actual Rate ({currencySymbol})
                         </label>
                         <input
                           type="number"
@@ -748,26 +778,12 @@ export const PurchasesView: React.FC = () => {
                         />
                       </div>
 
-                      <div className="sm:col-span-2">
+                      <div className="sm:col-span-2 text-right">
                         <label className="text-[10px] text-stone-500 font-semibold uppercase block mb-1">
-                          Tax %
+                          Line Amount
                         </label>
-                        <input
-                          type="number"
-                          min={0}
-                          max={100}
-                          value={row.taxPercent}
-                          onChange={(e) => updateRow(idx, 'taxPercent', Number(e.target.value))}
-                          className="w-full px-2.5 py-1.5 border border-stone-300 rounded-md text-xs"
-                        />
-                      </div>
-
-                      <div className="sm:col-span-1 text-right">
-                        <label className="text-[10px] text-stone-500 font-semibold uppercase block mb-1">
-                          Total
-                        </label>
-                        <span className="font-bold text-stone-900 block py-1.5">
-                          {currencySymbol}{analyzed.total}
+                        <span className="font-bold text-stone-900 font-mono block py-1.5">
+                          {currencySymbol}{analyzed.total.toFixed(2)}
                         </span>
                       </div>
 
@@ -806,19 +822,15 @@ export const PurchasesView: React.FC = () => {
               })}
             </div>
 
-            {/* Bill Net Calculation */}
+            {/* Bill Total Summary (Tax-Free: Received Qty x Actual Rate = Line Amount, Grand Total = Sum of Line Amounts) */}
             <div className="p-4 bg-stone-50 border-t border-stone-200 flex flex-col items-end gap-1 text-xs">
-              <div className="flex justify-between w-48 text-stone-600">
+              <div className="flex justify-between w-52 text-stone-600">
                 <span>Subtotal:</span>
-                <span>{currencySymbol}{totalAmount.toFixed(2)}</span>
+                <span className="font-mono">{currencySymbol}{totalAmount.toFixed(2)}</span>
               </div>
-              <div className="flex justify-between w-48 text-stone-600">
-                <span>Tax Amount:</span>
-                <span>{currencySymbol}{taxAmount.toFixed(2)}</span>
-              </div>
-              <div className="flex justify-between w-48 text-stone-900 font-bold text-sm pt-1 border-t border-stone-200">
-                <span>Net Payable:</span>
-                <span>{currencySymbol}{netAmount.toFixed(2)}</span>
+              <div className="flex justify-between w-52 text-stone-900 font-bold text-sm pt-1.5 border-t border-stone-200">
+                <span>Grand Total:</span>
+                <span className="font-mono">{currencySymbol}{grandTotal.toFixed(2)}</span>
               </div>
             </div>
           </div>
@@ -1084,6 +1096,140 @@ export const PurchasesView: React.FC = () => {
                     </button>
                   </div>
                 </form>
+              </div>
+            );
+          })()}
+        </Modal>
+      )}
+
+      {/* Inward Purchase Details Modal (Tax-Free & Safely Compatible with Historical Records) */}
+      {viewingPurchase && (
+        <Modal
+          isOpen={!!viewingPurchase}
+          onClose={() => setViewingPurchase(null)}
+          title={`Inward Purchase Details — Bill #${viewingPurchase.billNumber}`}
+          subtitle={`Supplier: ${viewingPurchase.vendorName} · Invoice Date: ${viewingPurchase.billDate}`}
+          maxWidth="2xl"
+        >
+          {(() => {
+            const itemsList = viewingPurchase.items || [];
+            const computedSubtotal = Number(
+              itemsList
+                .reduce((sum, item) => {
+                  const qty = Number(item.quantity) || 0;
+                  const rate = Number(item.purchaseRate ?? item.rate ?? 0) || 0;
+                  return sum + Number((qty * rate).toFixed(2));
+                }, 0)
+                .toFixed(2)
+            );
+            const displayTotal =
+              itemsList.length > 0
+                ? computedSubtotal
+                : Number(viewingPurchase.totalAmount || viewingPurchase.netAmount || 0);
+            const receivedDateText = viewingPurchase.createdAt
+              ? new Date(viewingPurchase.createdAt).toLocaleString('en-IN')
+              : viewingPurchase.billDate;
+
+            return (
+              <div className="space-y-4 text-xs">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-3.5 bg-stone-50 rounded-xl border border-stone-200">
+                  <div>
+                    <span className="text-[10px] font-bold uppercase text-stone-500 block">Supplier</span>
+                    <span className="font-semibold text-stone-900">{viewingPurchase.vendorName}</span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] font-bold uppercase text-stone-500 block">Bill / Invoice #</span>
+                    <span className="font-mono font-bold text-stone-900">{viewingPurchase.billNumber}</span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] font-bold uppercase text-stone-500 block">Invoice Date</span>
+                    <span className="font-medium text-stone-800">{viewingPurchase.billDate}</span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] font-bold uppercase text-stone-500 block">Received On</span>
+                    <span className="font-medium text-stone-800">{receivedDateText}</span>
+                  </div>
+                </div>
+
+                <div className="border border-stone-200 rounded-xl overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs text-stone-600">
+                      <thead className="bg-stone-50 border-b border-stone-200 text-[10px] uppercase font-bold text-stone-500">
+                        <tr>
+                          <th className="py-2.5 px-3">Item</th>
+                          <th className="py-2.5 px-3 text-right">Received Qty</th>
+                          <th className="py-2.5 px-3 text-center">UOM</th>
+                          <th className="py-2.5 px-3 text-right">Actual Rate</th>
+                          <th className="py-2.5 px-3 text-right">Line Amount</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-stone-100">
+                        {itemsList.length === 0 ? (
+                          <tr>
+                            <td colSpan={5} className="py-6 text-center text-stone-400">
+                              No itemized lines recorded on this bill.
+                            </td>
+                          </tr>
+                        ) : (
+                          itemsList.map((item, idx) => {
+                            const qty = Number(item.quantity) || 0;
+                            const rate = Number(item.purchaseRate ?? item.rate ?? 0) || 0;
+                            const lineAmount = Number((qty * rate).toFixed(2));
+                            return (
+                              <tr key={`${item.itemId || idx}-${idx}`} className="hover:bg-stone-50/60">
+                                <td className="py-2.5 px-3 font-medium text-stone-900">{item.itemName}</td>
+                                <td className="py-2.5 px-3 text-right font-bold text-stone-900">{qty}</td>
+                                <td className="py-2.5 px-3 text-center text-stone-500">{item.unit}</td>
+                                <td className="py-2.5 px-3 text-right font-mono text-stone-700">
+                                  {currencySymbol}{rate.toFixed(2)}
+                                </td>
+                                <td className="py-2.5 px-3 text-right font-mono font-bold text-stone-900">
+                                  {currencySymbol}{lineAmount.toFixed(2)}
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="p-3.5 bg-stone-50 border-t border-stone-200 flex flex-col items-end gap-1">
+                    <div className="flex justify-between w-52 text-stone-600">
+                      <span>Subtotal:</span>
+                      <span className="font-mono">{currencySymbol}{displayTotal.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between w-52 text-stone-900 font-bold text-sm pt-1.5 border-t border-stone-200">
+                      <span>Grand Total:</span>
+                      <span className="font-mono">{currencySymbol}{displayTotal.toFixed(2)}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="pt-2 flex justify-end gap-2 border-t border-stone-100">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      exportInwardPurchaseBillPdf(
+                        viewingPurchase,
+                        activeRestaurant?.name || 'Restaurant',
+                        currencySymbol,
+                        activeRestaurant?.address,
+                        activeRestaurant?.timezone
+                      )
+                    }
+                    className="flex items-center gap-1.5 px-4 py-2 bg-[#0D2149] hover:bg-[#16336e] text-white text-xs font-semibold rounded-lg transition-colors"
+                  >
+                    <Printer className="w-3.5 h-3.5" /> Download PDF
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setViewingPurchase(null)}
+                    className="px-4 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-lg"
+                  >
+                    Close
+                  </button>
+                </div>
               </div>
             );
           })()}

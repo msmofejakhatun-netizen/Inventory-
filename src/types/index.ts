@@ -147,7 +147,8 @@ export interface PurchaseItemRow {
   quantity: number;
   rate: number;
   purchaseRate?: number;
-  taxPercent: number;
+  /** @deprecated Tax system removed from purchases; retained optional only for historical record compatibility. */
+  taxPercent?: number;
   total: number;
   amount?: number;
   previousRate: number;
@@ -168,7 +169,8 @@ export interface Purchase {
   vendorId: string;
   vendorName: string;
   totalAmount: number;
-  taxAmount: number;
+  /** @deprecated Tax system removed from purchases; retained optional only for historical record compatibility. */
+  taxAmount?: number;
   netAmount: number;
   paidAmount?: number;
   remainingAmount?: number;

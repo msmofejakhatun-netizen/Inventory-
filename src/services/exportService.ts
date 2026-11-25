@@ -1,5 +1,5 @@
 import jsPDF from 'jspdf';
-import { Item, PurchaseOrder, StockCount } from '../types';
+import { Item, Purchase, PurchaseOrder, StockCount } from '../types';
 import { getInventoryStockStatus } from './calculations';
 import {
   A4_LAYOUT,
@@ -584,41 +584,50 @@ export function buildPurchaseOrderPdf(
 
   cursorY += cardHeight + 5;
 
-  // PO Items Table
+  // PO Items Table (strictly tax-free: Quantity x Rate = Amount, separate Quantity & UOM columns)
   const columns: PdfTableColumn[] = isReceivedView
     ? [
-        { header: '#', weight: 0.45, align: 'center' },
-        { header: 'Item Description', weight: 2.6, align: 'left', isBold: true },
-        { header: 'Ordered', weight: 1.0, align: 'right' },
-        { header: 'Received', weight: 1.0, align: 'right', isBold: true },
-        { header: 'Missing', weight: 0.9, align: 'right' },
-        { header: 'Actual Rate', weight: 1.15, align: 'right' },
-        { header: 'Actual Amt', weight: 1.25, align: 'right', isBold: true },
+        { header: '#', weight: 0.42, align: 'center' },
+        { header: 'Item Name', weight: 2.55, align: 'left', isBold: true },
+        { header: 'Ordered', weight: 0.85, align: 'right' },
+        { header: 'Received', weight: 0.9, align: 'right', isBold: true },
+        { header: 'UOM', weight: 0.65, align: 'center' },
+        { header: 'Actual\nRate', weight: 1.1, align: 'right' },
+        { header: 'Amount', weight: 1.25, align: 'right', isBold: true },
       ]
     : [
-        { header: '#', weight: 0.5, align: 'center' },
-        { header: 'Item Description', weight: 3.4, align: 'left', isBold: true },
-        { header: 'Order Qty', weight: 1.25, align: 'right', isBold: true },
-        { header: 'Est. Rate', weight: 1.25, align: 'right' },
-        { header: 'Est. Amount', weight: 1.4, align: 'right', isBold: true },
+        { header: '#', weight: 0.45, align: 'center' },
+        { header: 'Item Name', weight: 3.1, align: 'left', isBold: true },
+        { header: 'Quantity', weight: 0.95, align: 'right', isBold: true },
+        { header: 'UOM', weight: 0.7, align: 'center' },
+        { header: 'Rate', weight: 1.15, align: 'right' },
+        { header: 'Amount', weight: 1.35, align: 'right', isBold: true },
       ];
 
-  const rows: (string | number)[][] = po.items.map((item, idx) => {
-    const ordered = item.orderedQty ?? item.recommendedQuantity ?? 0;
-    const estRate = item.estimatedRate ?? 0;
-    const estAmt = item.estimatedAmount ?? ordered * estRate;
+  let computedSubtotal = 0;
+  let computedTotalQty = 0;
+  let computedReceivedSubtotal = 0;
+  let computedReceivedQty = 0;
+
+  const rows: (string | number)[][] = (po.items || []).map((item, idx) => {
+    const ordered = Number(item.orderedQty ?? item.recommendedQuantity ?? 0) || 0;
+    const estRate = Number(item.estimatedRate ?? 0) || 0;
+    const estAmt = Number((ordered * estRate).toFixed(2));
+    computedSubtotal = Number((computedSubtotal + estAmt).toFixed(2));
+    computedTotalQty = Number((computedTotalQty + ordered).toFixed(2));
 
     if (isReceivedView) {
-      const recv = item.receivedQty ?? 0;
-      const missing = item.missingQty ?? 0;
-      const actualRate = item.actualRate ?? estRate;
-      const actualAmt = item.actualAmount ?? recv * actualRate;
+      const recv = Number(item.receivedQty ?? 0) || 0;
+      const actualRate = Number(item.actualRate ?? estRate) || 0;
+      const actualAmt = Number((recv * actualRate).toFixed(2));
+      computedReceivedSubtotal = Number((computedReceivedSubtotal + actualAmt).toFixed(2));
+      computedReceivedQty = Number((computedReceivedQty + recv).toFixed(2));
       return [
         idx + 1,
         item.itemName,
-        `${formatQuantityClean(ordered)} ${item.unit}`,
-        `${formatQuantityClean(recv)} ${item.unit}`,
-        `${formatQuantityClean(missing)} ${item.unit}`,
+        formatQuantityClean(ordered),
+        formatQuantityClean(recv),
+        item.unit || '',
         formatInrAmount(actualRate, currencySymbol),
         formatInrAmount(actualAmt, currencySymbol),
       ];
@@ -627,26 +636,34 @@ export function buildPurchaseOrderPdf(
     return [
       idx + 1,
       item.itemName,
-      `${formatQuantityClean(ordered)} ${item.unit}`,
+      formatQuantityClean(ordered),
+      item.unit || '',
       formatInrAmount(estRate, currencySymbol),
       formatInrAmount(estAmt, currencySymbol),
     ];
   });
 
-  const totalEst = po.estimatedTotal ?? po.totalEstimatedAmount ?? 0;
-  const totalRecv = po.actualReceivedTotal ?? 0;
+  const displaySubtotal = isReceivedView ? computedReceivedSubtotal : computedSubtotal;
+  const displayTotalQty = isReceivedView ? computedReceivedQty : computedTotalQty;
 
   const totalsRow: (string | number)[] = isReceivedView
     ? [
         '',
-        'TOTAL RECEIVED VALUE',
+        `TOTAL (${rows.length} ${rows.length === 1 ? 'Item' : 'Items'})`,
+        formatQuantityClean(computedTotalQty),
+        formatQuantityClean(computedReceivedQty),
         '',
-        '',
-        '',
-        '',
-        formatInrAmount(totalRecv || totalEst, currencySymbol),
+        'Grand Total:',
+        formatInrAmount(displaySubtotal, currencySymbol),
       ]
-    : ['', 'TOTAL ESTIMATED VALUE', '', '', formatInrAmount(totalEst, currencySymbol)];
+    : [
+        '',
+        `TOTAL (${rows.length} ${rows.length === 1 ? 'Item' : 'Items'})`,
+        formatQuantityClean(computedTotalQty),
+        '',
+        'Grand Total:',
+        formatInrAmount(displaySubtotal, currencySymbol),
+      ];
 
   cursorY = renderA4Table(doc, {
     columns,
@@ -657,44 +674,56 @@ export function buildPurchaseOrderPdf(
     emptyMessage: 'No line items in this Purchase Order.',
   });
 
-  // Financial Summary & Authorization Block (kept intact without splitting across page break)
-  const summaryBlockH = isReceivedView && po.actualReceivedTotal ? 40 : 33;
+  // Financial Summary & Authorization Block (tax-free: Total Quantity, Subtotal, Grand Total)
+  const summaryBlockH = 44;
   if (cursorY + summaryBlockH > usableBottomY) {
     doc.addPage('a4', 'portrait');
     cursorY = drawStoqoContinuationHeader(doc, headerOptions, `${po.poNumber} — Summary & Authorization`);
   }
 
-  // Right-aligned totals breakdown box
-  const totalsBoxW = 78;
+  // Right-aligned summary box (Total Quantity, Subtotal, Grand Total — NO tax rows)
+  const totalsBoxW = 82;
   const totalsBoxX = pageWidth - marginX - totalsBoxW;
-  const totalsBoxH = isReceivedView && po.actualReceivedTotal ? 16 : 10;
+  const totalsBoxH = 21.5;
 
   doc.setFillColor(...STOQO_PDF_COLORS.lightBg);
   doc.setDrawColor(...STOQO_PDF_COLORS.border);
   doc.roundedRect(totalsBoxX, cursorY, totalsBoxW, totalsBoxH, 1.5, 1.5, 'FD');
 
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(8.2);
-  drawPdfText(doc, 'Estimated PO Total:', totalsBoxX + 3, cursorY + 6.2, {
-    color: STOQO_PDF_COLORS.slate700,
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.8);
+  drawPdfText(doc, 'Total Quantity:', totalsBoxX + 3, cursorY + 5.2, {
+    color: STOQO_PDF_COLORS.slate600,
   });
-  drawPdfText(doc, formatInrAmount(totalEst, currencySymbol), totalsBoxX + totalsBoxW - 3, cursorY + 6.2, {
+  drawPdfText(
+    doc,
+    `${formatQuantityClean(displayTotalQty)} (${rows.length} ${rows.length === 1 ? 'item' : 'items'})`,
+    totalsBoxX + totalsBoxW - 3,
+    cursorY + 5.2,
+    { align: 'right', color: STOQO_PDF_COLORS.slate900 }
+  );
+
+  drawPdfText(doc, 'Subtotal:', totalsBoxX + 3, cursorY + 10.6, {
+    color: STOQO_PDF_COLORS.slate600,
+  });
+  drawPdfText(doc, formatInrAmount(displaySubtotal, currencySymbol), totalsBoxX + totalsBoxW - 3, cursorY + 10.6, {
+    align: 'right',
+    color: STOQO_PDF_COLORS.slate900,
+  });
+
+  doc.setDrawColor(...STOQO_PDF_COLORS.border);
+  doc.setLineWidth(0.25);
+  doc.line(totalsBoxX + 3, cursorY + 13.4, totalsBoxX + totalsBoxW - 3, cursorY + 13.4);
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8.8);
+  drawPdfText(doc, 'Grand Total:', totalsBoxX + 3, cursorY + 18.4, {
+    color: STOQO_PDF_COLORS.navy,
+  });
+  drawPdfText(doc, formatInrAmount(displaySubtotal, currencySymbol), totalsBoxX + totalsBoxW - 3, cursorY + 18.4, {
     align: 'right',
     color: STOQO_PDF_COLORS.navy,
   });
-
-  if (isReceivedView && po.actualReceivedTotal) {
-    drawPdfText(doc, 'Actual Received Total:', totalsBoxX + 3, cursorY + 12.6, {
-      color: STOQO_PDF_COLORS.green,
-    });
-    drawPdfText(
-      doc,
-      formatInrAmount(po.actualReceivedTotal, currencySymbol),
-      totalsBoxX + totalsBoxW - 3,
-      cursorY + 12.6,
-      { align: 'right', color: STOQO_PDF_COLORS.green }
-    );
-  }
 
   cursorY += totalsBoxH + 7;
 
@@ -738,4 +767,199 @@ export function exportPurchaseOrderPdf(
 ) {
   const doc = buildPurchaseOrderPdf(po, restaurantName, currencySymbol, restaurantAddress, timezone);
   doc.save(`${po.poNumber}_${po.vendorName.replace(/[^a-zA-Z0-9]+/g, '_')}.pdf`);
+}
+
+// ============================================================================
+// INWARD PURCHASE BILL PDF (Standardized A4 Portrait — Tax-Free)
+// ============================================================================
+
+export function buildInwardPurchaseBillPdf(
+  purchase: Purchase,
+  restaurantName: string,
+  currencySymbol: string = '₹',
+  restaurantAddress?: string,
+  timezone?: string,
+  generatedAt: Date = new Date()
+): jsPDF {
+  const doc = createA4PdfDocument('portrait');
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const marginX = A4_LAYOUT.marginX;
+  const contentWidth = pageWidth - marginX * 2;
+  const usableBottomY = pageHeight - A4_LAYOUT.footerReservedHeight;
+
+  const receivedDateLabel = purchase.createdAt
+    ? formatPdfDateTime(new Date(purchase.createdAt), timezone)
+    : purchase.billDate;
+
+  const headerOptions: PdfHeaderOptions = {
+    restaurantName: restaurantName || 'Restaurant',
+    restaurantAddress,
+    reportTitle: 'Inward Purchase Receipt',
+    dateRangeLabel: `Invoice Date: ${purchase.billDate}`,
+    generatedAt,
+    timezone,
+    rightMetaLabel: `Bill #: ${purchase.billNumber}`,
+  };
+
+  let cursorY = drawStoqoPageOneHeader(doc, headerOptions);
+
+  // Supplier & Invoice Metadata Card
+  const cardHeight = 25;
+  doc.setFillColor(...STOQO_PDF_COLORS.lightBg);
+  doc.setDrawColor(...STOQO_PDF_COLORS.border);
+  doc.setLineWidth(0.25);
+  doc.roundedRect(marginX, cursorY, contentWidth, cardHeight, 1.5, 1.5, 'FD');
+
+  const leftColX = marginX + 3.5;
+  const rightColX = marginX + contentWidth / 2 + 4;
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8.4);
+  drawPdfText(doc, `Supplier: ${purchase.vendorName || 'Vendor'}`, leftColX, cursorY + 6.5, {
+    color: STOQO_PDF_COLORS.navy,
+  });
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.8);
+  drawPdfText(doc, `Invoice / Bill Number: ${purchase.billNumber}`, leftColX, cursorY + 12.8, {
+    color: STOQO_PDF_COLORS.slate900,
+  });
+
+  drawPdfText(
+    doc,
+    `PO Reference: ${purchase.poNumber || 'Direct Inward Purchase'}`,
+    leftColX,
+    cursorY + 19.0,
+    { color: STOQO_PDF_COLORS.slate600 }
+  );
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.8);
+  drawPdfText(doc, `Invoice Date: ${purchase.billDate || '—'}`, rightColX, cursorY + 6.5, {
+    color: STOQO_PDF_COLORS.slate900,
+  });
+  drawPdfText(doc, `Received Date: ${receivedDateLabel}`, rightColX, cursorY + 12.8, {
+    color: STOQO_PDF_COLORS.slate700,
+  });
+  drawPdfText(
+    doc,
+    `Recorded By: ${purchase.recordedByName || 'Store Staff'}`,
+    rightColX,
+    cursorY + 19.0,
+    { color: STOQO_PDF_COLORS.slate600 }
+  );
+
+  cursorY += cardHeight + 5;
+
+  // Strictly tax-free line items: Received Qty x Actual Rate = Line Amount
+  const columns: PdfTableColumn[] = [
+    { header: '#', weight: 0.45, align: 'center' },
+    { header: 'Item', weight: 3.05, align: 'left', isBold: true },
+    { header: 'Received\nQty', weight: 1.0, align: 'right', isBold: true },
+    { header: 'UOM', weight: 0.7, align: 'center' },
+    { header: 'Actual\nRate', weight: 1.15, align: 'right' },
+    { header: 'Line\nAmount', weight: 1.35, align: 'right', isBold: true },
+  ];
+
+  let subtotal = 0;
+  let totalQty = 0;
+  const rows: (string | number)[][] = (purchase.items || []).map((item, idx) => {
+    const qty = Number(item.quantity) || 0;
+    const rate = Number(item.purchaseRate ?? item.rate ?? 0) || 0;
+    const lineAmount = Number((qty * rate).toFixed(2));
+    subtotal = Number((subtotal + lineAmount).toFixed(2));
+    totalQty = Number((totalQty + qty).toFixed(2));
+
+    return [
+      idx + 1,
+      item.itemName || 'Item',
+      formatQuantityClean(qty),
+      item.unit || '',
+      formatInrAmount(rate, currencySymbol),
+      formatInrAmount(lineAmount, currencySymbol),
+    ];
+  });
+
+  // Fallback for legacy bills without itemized lines
+  const grandTotal = rows.length > 0 ? subtotal : Number(purchase.totalAmount || purchase.netAmount || 0);
+
+  const totalsRow: (string | number)[] = [
+    '',
+    `TOTAL (${rows.length} ${rows.length === 1 ? 'Item' : 'Items'})`,
+    formatQuantityClean(totalQty),
+    '',
+    'Grand Total:',
+    formatInrAmount(grandTotal, currencySymbol),
+  ];
+
+  cursorY = renderA4Table(doc, {
+    columns,
+    rows,
+    totalsRow: rows.length > 0 ? totalsRow : undefined,
+    startY: cursorY,
+    headerOptions,
+    emptyMessage: 'No line items recorded on this inward purchase bill.',
+  });
+
+  // Summary Block (Subtotal & Grand Total — NO tax breakdown)
+  const summaryBlockH = 34;
+  if (cursorY + summaryBlockH > usableBottomY) {
+    doc.addPage('a4', 'portrait');
+    cursorY = drawStoqoContinuationHeader(doc, headerOptions, `Bill #${purchase.billNumber} — Summary`);
+  }
+
+  const totalsBoxW = 80;
+  const totalsBoxX = pageWidth - marginX - totalsBoxW;
+  const totalsBoxH = 16.5;
+
+  doc.setFillColor(...STOQO_PDF_COLORS.lightBg);
+  doc.setDrawColor(...STOQO_PDF_COLORS.border);
+  doc.roundedRect(totalsBoxX, cursorY, totalsBoxW, totalsBoxH, 1.5, 1.5, 'FD');
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.8);
+  drawPdfText(doc, 'Subtotal:', totalsBoxX + 3, cursorY + 5.5, {
+    color: STOQO_PDF_COLORS.slate600,
+  });
+  drawPdfText(doc, formatInrAmount(grandTotal, currencySymbol), totalsBoxX + totalsBoxW - 3, cursorY + 5.5, {
+    align: 'right',
+    color: STOQO_PDF_COLORS.slate900,
+  });
+
+  doc.setDrawColor(...STOQO_PDF_COLORS.border);
+  doc.setLineWidth(0.25);
+  doc.line(totalsBoxX + 3, cursorY + 8.3, totalsBoxX + totalsBoxW - 3, cursorY + 8.3);
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8.8);
+  drawPdfText(doc, 'Grand Total:', totalsBoxX + 3, cursorY + 13.4, {
+    color: STOQO_PDF_COLORS.navy,
+  });
+  drawPdfText(doc, formatInrAmount(grandTotal, currencySymbol), totalsBoxX + totalsBoxW - 3, cursorY + 13.4, {
+    align: 'right',
+    color: STOQO_PDF_COLORS.navy,
+  });
+
+  applyStoqoPageFooters(doc, headerOptions);
+  return doc;
+}
+
+export function exportInwardPurchaseBillPdf(
+  purchase: Purchase,
+  restaurantName: string,
+  currencySymbol: string = '₹',
+  restaurantAddress?: string,
+  timezone?: string
+): void {
+  const doc = buildInwardPurchaseBillPdf(
+    purchase,
+    restaurantName,
+    currencySymbol,
+    restaurantAddress,
+    timezone
+  );
+  const safeBill = makeSafeFilenameSlug(purchase.billNumber || 'inward_bill');
+  const safeVendor = makeSafeFilenameSlug(purchase.vendorName || 'vendor');
+  doc.save(`STOQO_Inward_Purchase_${safeBill}_${safeVendor}.pdf`);
 }

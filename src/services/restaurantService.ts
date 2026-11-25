@@ -246,7 +246,7 @@ export async function executePurchaseTransaction(
     vendorId: string;
     vendorName: string;
     totalAmount: number;
-    taxAmount: number;
+    taxAmount?: number;
     netAmount: number;
     paymentStatus: 'unpaid' | 'partially_paid' | 'paid' | 'UNPAID' | 'PARTIALLY_PAID' | 'PAID';
     isOverride: boolean;
@@ -260,6 +260,25 @@ export async function executePurchaseTransaction(
   const purchaseRef = doc(getTenantCol(restaurantId, 'purchases'));
   const purchaseId = purchaseRef.id;
   const now = new Date().toISOString();
+
+  // Enforce tax-free line calculation: Line Amount = Received Quantity x Actual Purchase Rate
+  const normalizedItems: PurchaseItemRow[] = purchaseData.items.map((itemRow) => {
+    const qty = Number(itemRow.quantity) || 0;
+    const rate = Number(itemRow.rate) || 0;
+    const lineAmount = Number((qty * rate).toFixed(2));
+    return {
+      ...itemRow,
+      quantity: qty,
+      rate,
+      purchaseRate: rate,
+      taxPercent: 0,
+      total: lineAmount,
+      amount: lineAmount,
+    };
+  });
+  const grandTotal = Number(
+    normalizedItems.reduce((sum, itemRow) => sum + itemRow.total, 0).toFixed(2)
+  );
 
   try {
     await runTransaction(db, async (transaction) => {
@@ -281,7 +300,7 @@ export async function executePurchaseTransaction(
         hikePct: number;
       }[] = [];
 
-      for (const itemRow of purchaseData.items) {
+      for (const itemRow of normalizedItems) {
         const itemRef = getTenantDoc(restaurantId, 'items', itemRow.itemId);
         const itemSnap = await transaction.get(itemRef);
         if (!itemSnap.exists()) {
@@ -318,7 +337,7 @@ export async function executePurchaseTransaction(
       // 3. Write Item updates and Stock Transactions
       for (let i = 0; i < itemUpdates.length; i++) {
         const update = itemUpdates[i];
-        const row = purchaseData.items[i];
+        const row = normalizedItems[i];
         transaction.update(update.ref, update.newItem);
 
         // Stock Transaction
@@ -357,17 +376,17 @@ export async function executePurchaseTransaction(
         }
       }
 
-      // 4. Update Vendor Balances
+      // 4. Update Vendor Balances (strictly tax-free Grand Total = Sum of Line Amounts)
       const isPaid = purchaseData.paymentStatus === 'paid' || purchaseData.paymentStatus === 'PAID';
-      const initialPaidAmount = isPaid ? purchaseData.netAmount : 0;
-      const initialRemainingAmount = isPaid ? 0 : purchaseData.netAmount;
+      const initialPaidAmount = isPaid ? grandTotal : 0;
+      const initialRemainingAmount = isPaid ? 0 : grandTotal;
       const initialStatus: 'UNPAID' | 'PAID' = isPaid ? 'PAID' : 'UNPAID';
 
-      const newVendorPurchases = Number(((vendorData.totalPurchases || 0) + purchaseData.netAmount).toFixed(2));
-      const additionalDue = isPaid ? 0 : purchaseData.netAmount;
+      const newVendorPurchases = Number(((vendorData.totalPurchases || 0) + grandTotal).toFixed(2));
+      const additionalDue = isPaid ? 0 : grandTotal;
       const newCurrentDue = Number(((vendorData.currentDue || 0) + additionalDue).toFixed(2));
       const newTotalPaid = isPaid
-        ? Number(((vendorData.totalPaid || 0) + purchaseData.netAmount).toFixed(2))
+        ? Number(((vendorData.totalPaid || 0) + grandTotal).toFixed(2))
         : (vendorData.totalPaid || 0);
 
       transaction.update(vendorRef, {
@@ -377,23 +396,23 @@ export async function executePurchaseTransaction(
         updatedAt: now,
       });
 
-      // 5. Create Purchase Doc
+      // 5. Create Purchase Doc (zero tax added)
       const finalPurchase: Purchase = {
         id: purchaseId,
         billNumber: purchaseData.billNumber,
         billDate: purchaseData.billDate,
         vendorId: purchaseData.vendorId,
         vendorName: purchaseData.vendorName,
-        totalAmount: purchaseData.totalAmount,
-        taxAmount: purchaseData.taxAmount,
-        netAmount: purchaseData.netAmount,
+        totalAmount: grandTotal,
+        taxAmount: 0,
+        netAmount: grandTotal,
         paidAmount: initialPaidAmount,
         remainingAmount: initialRemainingAmount,
         paymentStatus: initialStatus,
         isOverride: purchaseData.isOverride,
         overrideReason: purchaseData.overrideReason || '',
-        itemsCount: purchaseData.items.length,
-        items: purchaseData.items,
+        itemsCount: normalizedItems.length,
+        items: normalizedItems,
         recordedByUid: purchaseData.recordedByUid,
         recordedByName: purchaseData.recordedByName,
         restaurantId,
@@ -411,7 +430,7 @@ export async function executePurchaseTransaction(
         action: purchaseData.isOverride ? 'PURCHASE_RECORDED_WITH_OVERRIDE' : 'PURCHASE_RECORDED',
         entity: 'Purchase',
         entityId: purchaseId,
-        details: `Recorded purchase bill #${purchaseData.billNumber} (${purchaseData.items.length} items, total ₹${purchaseData.netAmount})${
+        details: `Recorded purchase bill #${purchaseData.billNumber} (${normalizedItems.length} items, total ₹${grandTotal.toFixed(2)})${
           purchaseData.isOverride ? ` [OVERRIDE REASON: ${purchaseData.overrideReason}]` : ''
         }`,
         restaurantId,
@@ -1762,7 +1781,28 @@ export async function createPurchaseOrder(
 ): Promise<string> {
   const poRef = doc(getTenantCol(restaurantId, 'purchaseOrders'));
   const now = new Date().toISOString();
-  const totalEstimated = poData.items.reduce((sum, item) => sum + item.estimatedAmount, 0);
+  const normalizedPoItems = poData.items.map((i) => {
+    const qty = Number(i.orderedQty) || 0;
+    const rate = Number(i.estimatedRate) || 0;
+    const lineAmount = Number((qty * rate).toFixed(2));
+    return {
+      itemId: i.itemId,
+      itemName: i.itemName,
+      unit: i.unit,
+      orderedQty: qty,
+      recommendedQuantity: qty,
+      estimatedRate: rate,
+      estimatedAmount: lineAmount,
+      reason: i.reason || 'Store replenishment',
+      receivedQty: 0,
+      missingQty: qty,
+      previouslyReceivedQty: 0,
+      itemStatus: 'MISSING' as const,
+    };
+  });
+  const totalEstimated = Number(
+    normalizedPoItems.reduce((sum, item) => sum + item.estimatedAmount, 0).toFixed(2)
+  );
 
   const po: PurchaseOrder = {
     id: poRef.id,
@@ -1771,20 +1811,7 @@ export async function createPurchaseOrder(
     vendorName: poData.vendorName,
     vendorPhone: poData.vendorPhone || '',
     status: 'DRAFT',
-    items: poData.items.map((i) => ({
-      itemId: i.itemId,
-      itemName: i.itemName,
-      unit: i.unit,
-      orderedQty: i.orderedQty,
-      recommendedQuantity: i.orderedQty,
-      estimatedRate: i.estimatedRate,
-      estimatedAmount: i.estimatedAmount,
-      reason: i.reason || 'Store replenishment',
-      receivedQty: 0,
-      missingQty: i.orderedQty,
-      previouslyReceivedQty: 0,
-      itemStatus: 'MISSING',
-    })),
+    items: normalizedPoItems,
     totalEstimatedAmount: totalEstimated,
     estimatedTotal: totalEstimated,
     actualReceivedTotal: 0,
@@ -1807,6 +1834,80 @@ export async function createPurchaseOrder(
     return poRef.id;
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, `restaurants/${restaurantId}/purchaseOrders`);
+    throw err;
+  }
+}
+
+/**
+ * Updates items (quantities & rates) on a DRAFT Purchase Order without any tax calculations.
+ * Line Amount = Quantity x Rate, Grand Total = Sum of Line Amounts.
+ */
+export async function updateDraftPurchaseOrder(
+  restaurantId: string,
+  poId: string,
+  poNumber: string,
+  items: {
+    itemId: string;
+    itemName: string;
+    unit: string;
+    orderedQty: number;
+    estimatedRate: number;
+    reason?: string;
+  }[],
+  actorUid: string,
+  actorName: string
+): Promise<void> {
+  const poRef = getTenantDoc(restaurantId, 'purchaseOrders', poId);
+  const now = new Date().toISOString();
+
+  const normalizedItems = items
+    .filter((i) => (Number(i.orderedQty) || 0) > 0)
+    .map((i) => {
+      const qty = Number(i.orderedQty) || 0;
+      const rate = Math.max(0, Number(i.estimatedRate) || 0);
+      const lineAmount = Number((qty * rate).toFixed(2));
+      return {
+        itemId: i.itemId,
+        itemName: i.itemName,
+        unit: i.unit,
+        orderedQty: qty,
+        recommendedQuantity: qty,
+        estimatedRate: rate,
+        estimatedAmount: lineAmount,
+        reason: i.reason || 'Store replenishment',
+        receivedQty: 0,
+        missingQty: qty,
+        previouslyReceivedQty: 0,
+        itemStatus: 'MISSING' as const,
+      };
+    });
+
+  if (normalizedItems.length === 0) {
+    throw new Error('Purchase Order must contain at least one item with quantity greater than 0.');
+  }
+
+  const grandTotal = Number(
+    normalizedItems.reduce((sum, item) => sum + item.estimatedAmount, 0).toFixed(2)
+  );
+
+  try {
+    await updateDoc(poRef, {
+      items: normalizedItems,
+      estimatedTotal: grandTotal,
+      totalEstimatedAmount: grandTotal,
+      updatedAt: now,
+    });
+    await logAuditEvent(
+      restaurantId,
+      actorUid,
+      actorName,
+      'PURCHASE_ORDER_UPDATED',
+      'PurchaseOrder',
+      poId,
+      `Updated Purchase Order ${poNumber} (${normalizedItems.length} items, grand total ₹${grandTotal.toFixed(2)})`
+    );
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, `restaurants/${restaurantId}/purchaseOrders/${poId}`);
     throw err;
   }
 }
@@ -1987,7 +2088,7 @@ export async function receivePurchaseOrderTransaction(
           quantity: input.newlyReceivedQty,
           rate: input.actualRate,
           purchaseRate: input.actualRate,
-          taxPercent: itemDoc.taxPercent || 0,
+          taxPercent: 0,
           total: lineTotal,
           amount: lineTotal,
           previousRate: prevRate,

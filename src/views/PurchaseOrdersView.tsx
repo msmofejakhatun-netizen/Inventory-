@@ -22,6 +22,7 @@ import {
   PackageCheck,
   Ban,
   FileCheck,
+  Pencil,
 } from 'lucide-react';
 import {
   collection,
@@ -42,6 +43,7 @@ import {
 } from '../types';
 import {
   createPurchaseOrder,
+  updateDraftPurchaseOrder,
   updatePurchaseOrderStatus,
   updateVendorContact,
   receivePurchaseOrderTransaction,
@@ -127,6 +129,28 @@ export const PurchaseOrdersView: React.FC = () => {
 
   // Full-Screen Smart Supplier-Wise PO Workspace state
   const [isCreateOpen, setIsCreateOpen] = useState(false);
+
+  // Edit Draft Purchase Order Modal state (tax-free: Qty x Rate = Amount, Grand Total = Sum)
+  const [editPoModal, setEditPoModal] = useState<{
+    isOpen: boolean;
+    po: PurchaseOrder | null;
+    items: {
+      itemId: string;
+      itemName: string;
+      unit: string;
+      orderedQty: number;
+      estimatedRate: number;
+      reason?: string;
+    }[];
+    isSaving: boolean;
+    error: string | null;
+  }>({
+    isOpen: false,
+    po: null,
+    items: [],
+    isSaving: false,
+    error: null,
+  });
 
   // Vendor Phone Quick Update Modal
   const [phoneModal, setPhoneModal] = useState<{
@@ -246,6 +270,60 @@ export const PurchaseOrdersView: React.FC = () => {
   // -------------------------------------------------------------------------
   const openCreateModal = () => {
     setIsCreateOpen(true);
+  };
+
+  // -------------------------------------------------------------------------
+  // EDIT DRAFT PO WORKFLOW (TAX-FREE: QTY x RATE = AMOUNT)
+  // -------------------------------------------------------------------------
+  const openEditPoModal = (po: PurchaseOrder) => {
+    setEditPoModal({
+      isOpen: true,
+      po,
+      items: (po.items || []).map((item) => ({
+        itemId: item.itemId,
+        itemName: item.itemName,
+        unit: item.unit,
+        orderedQty: Number(item.orderedQty ?? item.recommendedQuantity ?? 0) || 0,
+        estimatedRate: Number(item.estimatedRate ?? 0) || 0,
+        reason: item.reason,
+      })),
+      isSaving: false,
+      error: null,
+    });
+  };
+
+  const handleSaveEditPo = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeRestaurantId || !editPoModal.po) return;
+
+    const validItems = editPoModal.items.filter((i) => (Number(i.orderedQty) || 0) > 0);
+    if (validItems.length === 0) {
+      setEditPoModal((prev) => ({
+        ...prev,
+        error: 'Please keep at least one item with a quantity greater than 0.',
+      }));
+      return;
+    }
+
+    try {
+      setEditPoModal((prev) => ({ ...prev, isSaving: true, error: null }));
+      await updateDraftPurchaseOrder(
+        activeRestaurantId,
+        editPoModal.po.id,
+        editPoModal.po.poNumber,
+        validItems,
+        user?.uid || 'system',
+        userProfile?.name || user?.displayName || 'Authorized User'
+      );
+      setEditPoModal({ isOpen: false, po: null, items: [], isSaving: false, error: null });
+    } catch (err: any) {
+      console.error('Failed to update draft PO:', err);
+      setEditPoModal((prev) => ({
+        ...prev,
+        isSaving: false,
+        error: err?.message || 'Failed to update Purchase Order.',
+      }));
+    }
   };
 
   // -------------------------------------------------------------------------
@@ -951,9 +1029,16 @@ Please confirm receipt and delivery schedule.`;
                       <Printer className="w-3.5 h-3.5" /> Print / PDF
                     </button>
 
-                    {/* DRAFT actions: show "WhatsApp Order" */}
+                    {/* DRAFT actions: Edit PO, WhatsApp Order, Cancel */}
                     {status === 'DRAFT' && (
                       <>
+                        <button
+                          id={`btn-edit-po-${po.id}`}
+                          onClick={() => openEditPoModal(po)}
+                          className="flex items-center gap-1 px-2.5 py-1.5 text-xs border border-stone-200 hover:bg-stone-50 rounded-lg text-stone-700 font-medium transition-colors shrink-0"
+                        >
+                          <Pencil className="w-3.5 h-3.5" /> Edit PO
+                        </button>
                         <button
                           id={`btn-whatsapp-order-${po.id}`}
                           onClick={() => handleInitiateWhatsAppSend(po)}
@@ -1038,12 +1123,17 @@ Please confirm receipt and delivery schedule.`;
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-stone-50">
-                      {po.items.map((item, i) => {
-                        const ordered = item.orderedQty || item.recommendedQuantity || 0;
-                        const received = item.receivedQty || 0;
+                      {(po.items || []).map((item, i) => {
+                        const ordered = Number(item.orderedQty || item.recommendedQuantity || 0) || 0;
+                        const received = Number(item.receivedQty || 0) || 0;
                         const missing = item.missingQty ?? Math.max(0, ordered - received);
+                        const estRate = Number(item.estimatedRate || 0) || 0;
+                        const actualRate = Number(item.actualRate || estRate) || 0;
                         const isReceivedStatus =
-                          po.status === 'RECEIVED' || po.status === 'PARTIALLY_RECEIVED';
+                          status === 'RECEIVED' || status === 'PARTIALLY_RECEIVED';
+                        const lineAmount = isReceivedStatus
+                          ? Number((received * actualRate).toFixed(2))
+                          : Number((ordered * estRate).toFixed(2));
 
                         return (
                           <tr key={i} className="hover:bg-stone-50/60">
@@ -1063,20 +1153,17 @@ Please confirm receipt and delivery schedule.`;
                                 </td>
                                 <td className="py-2 px-2 text-right text-stone-700 font-mono">
                                   {currencySymbol}
-                                  {(item.actualRate || item.estimatedRate).toFixed(2)}
+                                  {actualRate.toFixed(2)}
                                 </td>
                               </>
                             )}
                             <td className="py-2 px-2 text-right text-stone-500 font-mono">
                               {currencySymbol}
-                              {item.estimatedRate.toFixed(2)}
+                              {estRate.toFixed(2)}
                             </td>
                             <td className="py-2 px-2 text-right font-semibold text-stone-900 font-mono">
                               {currencySymbol}
-                              {(isReceivedStatus && item.actualAmount
-                                ? item.actualAmount
-                                : item.estimatedAmount || ordered * item.estimatedRate
-                              ).toFixed(2)}
+                              {lineAmount.toFixed(2)}
                             </td>
                           </tr>
                         );
@@ -1647,6 +1734,143 @@ Please confirm receipt and delivery schedule.`;
             >
               <PackageCheck className="w-4 h-4" />
               {receiveModal.isSubmitting ? 'Updating Inventory...' : 'Receive Order & Update Stock'}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* ------------------------------------------------------------------- */}
+      {/* MODAL 5: EDIT DRAFT PURCHASE ORDER (TAX-FREE: QTY x RATE = AMOUNT)  */}
+      {/* ------------------------------------------------------------------- */}
+      <Modal
+        isOpen={editPoModal.isOpen}
+        onClose={() => setEditPoModal({ isOpen: false, po: null, items: [], isSaving: false, error: null })}
+        title={`Edit Purchase Order ${editPoModal.po?.poNumber || ''}`}
+        subtitle={`Supplier: ${editPoModal.po?.vendorName || ''} · Line Amount = Quantity × Rate`}
+        maxWidth="2xl"
+      >
+        <form onSubmit={handleSaveEditPo} className="space-y-4">
+          {editPoModal.error && (
+            <div className="p-3 bg-rose-50 border border-rose-200 text-xs text-rose-800 rounded-lg flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+              <span>{editPoModal.error}</span>
+            </div>
+          )}
+
+          <div className="border border-stone-200 rounded-xl overflow-hidden">
+            <div className="overflow-x-auto max-h-80 overflow-y-auto">
+              <table className="w-full text-left text-xs text-stone-600">
+                <thead className="bg-stone-50 border-b border-stone-200 text-[10px] uppercase font-bold text-stone-500 sticky top-0">
+                  <tr>
+                    <th className="py-2.5 px-3">Item Name</th>
+                    <th className="py-2.5 px-2 text-right">Quantity</th>
+                    <th className="py-2.5 px-2 text-center">UOM</th>
+                    <th className="py-2.5 px-2 text-right">Rate ({currencySymbol})</th>
+                    <th className="py-2.5 px-3 text-right">Amount</th>
+                    <th className="py-2.5 px-2 text-center">Remove</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-stone-100">
+                  {editPoModal.items.map((row, idx) => {
+                    const lineAmount = Number(((Number(row.orderedQty) || 0) * (Number(row.estimatedRate) || 0)).toFixed(2));
+                    return (
+                      <tr key={`${row.itemId}-${idx}`} className="hover:bg-stone-50/60">
+                        <td className="py-2 px-3 font-medium text-stone-900">{row.itemName}</td>
+                        <td className="py-2 px-2 text-right">
+                          <input
+                            type="number"
+                            min={0.01}
+                            step="any"
+                            required
+                            value={row.orderedQty}
+                            onChange={(e) => {
+                              const val = Math.max(0, Number(e.target.value) || 0);
+                              setEditPoModal((prev) => ({
+                                ...prev,
+                                items: prev.items.map((it, i) => (i === idx ? { ...it, orderedQty: val } : it)),
+                              }));
+                            }}
+                            className="w-20 px-2 py-1 text-xs border border-stone-300 rounded text-right font-bold"
+                          />
+                        </td>
+                        <td className="py-2 px-2 text-center text-stone-500">{row.unit}</td>
+                        <td className="py-2 px-2 text-right">
+                          <input
+                            type="number"
+                            min={0}
+                            step="any"
+                            value={row.estimatedRate}
+                            onChange={(e) => {
+                              const val = Math.max(0, Number(e.target.value) || 0);
+                              setEditPoModal((prev) => ({
+                                ...prev,
+                                items: prev.items.map((it, i) => (i === idx ? { ...it, estimatedRate: val } : it)),
+                              }));
+                            }}
+                            className="w-24 px-2 py-1 text-xs border border-stone-300 rounded text-right font-mono font-bold"
+                          />
+                        </td>
+                        <td className="py-2 px-3 text-right font-mono font-bold text-stone-900">
+                          {currencySymbol}{lineAmount.toFixed(2)}
+                        </td>
+                        <td className="py-2 px-2 text-center">
+                          <button
+                            type="button"
+                            disabled={editPoModal.items.length <= 1}
+                            onClick={() =>
+                              setEditPoModal((prev) => ({
+                                ...prev,
+                                items: prev.items.filter((_, i) => i !== idx),
+                              }))
+                            }
+                            className="p-1 text-stone-400 hover:text-rose-600 disabled:opacity-30"
+                            title="Remove item"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {(() => {
+              const grandTotal = Number(
+                editPoModal.items
+                  .reduce((sum, r) => sum + Number(((Number(r.orderedQty) || 0) * (Number(r.estimatedRate) || 0)).toFixed(2)), 0)
+                  .toFixed(2)
+              );
+              return (
+                <div className="p-3.5 bg-stone-50 border-t border-stone-200 flex flex-col items-end gap-1 text-xs">
+                  <div className="flex justify-between w-52 text-stone-600">
+                    <span>Subtotal:</span>
+                    <span className="font-mono">{currencySymbol}{grandTotal.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between w-52 text-stone-900 font-bold text-sm pt-1.5 border-t border-stone-200">
+                    <span>Grand Total:</span>
+                    <span className="font-mono">{currencySymbol}{grandTotal.toFixed(2)}</span>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+
+          <div className="pt-2 flex justify-end gap-2 border-t border-stone-100">
+            <button
+              type="button"
+              onClick={() => setEditPoModal({ isOpen: false, po: null, items: [], isSaving: false, error: null })}
+              className="px-4 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-lg"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={editPoModal.isSaving}
+              className="px-5 py-2 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold rounded-lg shadow-xs disabled:opacity-50"
+            >
+              {editPoModal.isSaving ? 'Saving...' : 'Save Purchase Order'}
             </button>
           </div>
         </form>
