@@ -57,3 +57,79 @@
     transform: none !important;
   }
 }
+
+/* Global A4 Portrait Print Standardisation for STOQO */
+@page {
+  size: A4 portrait;
+  margin: 10mm;
+}
+
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 10mm;
+  }
+
+  html,
+  body {
+    width: 210mm;
+    min-height: 297mm;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+    color: #0f172a !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  aside,
+  nav,
+  .no-print {
+    display: none !important;
+  }
+
+  main,
+  .print-container {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+  }
+
+  .overflow-x-auto,
+  .overflow-x-scroll {
+    overflow: visible !important;
+  }
+
+  table {
+    width: 100% !important;
+    max-width: 100% !important;
+    border-collapse: collapse !important;
+    table-layout: auto !important;
+    font-size: 8.5pt !important;
+    page-break-inside: auto;
+  }
+
+  thead {
+    display: table-header-group !important;
+  }
+
+  tfoot {
+    display: table-footer-group !important;
+  }
+
+  tr,
+  .print-avoid-break {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  th,
+  td {
+    word-wrap: break-word !important;
+    overflow-wrap: anywhere !important;
+    padding: 4px 5px !important;
+  }
+}
+

@@ -146,9 +146,8 @@ export function buildGenericReportPdf(
   rows: (string | number)[][],
   options?: GenericReportPdfOptions
 ): jsPDF {
-  const orientation: PdfOrientation =
-    options?.orientation ?? (headers.length >= 8 ? 'landscape' : 'portrait');
-  const doc = createA4PdfDocument(orientation);
+  // Always enforce A4 Portrait (210mm x 297mm) across all STOQO reports — never auto-switch to Landscape
+  const doc = createA4PdfDocument('portrait');
 
   const generatedAt = options?.generatedAt ?? new Date();
   const headerOptions: PdfHeaderOptions = {
@@ -219,7 +218,7 @@ export interface CurrentStockPdfOptions {
 }
 
 /**
- * Builds the standardized A4 Landscape Current Stock Inventory Report PDF.
+ * Builds the standardized A4 Portrait Current Stock Inventory Report PDF (210mm x 297mm).
  * Uses `getInventoryStockStatus` (the exact single-source-of-truth logic used by StockView.tsx)
  * so every item's status (`OUT OF STOCK`, `LOW STOCK`, `IN STOCK`, `INACTIVE`) matches the live screen 100%.
  */
@@ -234,7 +233,7 @@ export function buildCurrentStockInventoryPdf(options: CurrentStockPdfOptions): 
     generatedAt = new Date(),
   } = options;
 
-  const doc = createA4PdfDocument('landscape');
+  const doc = createA4PdfDocument('portrait');
 
   // Compute unified status for every row using the shared source-of-truth helper
   const enriched = items.map((entry) => ({
@@ -290,17 +289,18 @@ export function buildCurrentStockInventoryPdf(options: CurrentStockPdfOptions): 
 
   cursorY = drawPdfSummaryCards(doc, summaryCards, cursorY);
 
+  // Portrait-optimized 10-column layout across 190mm printable width (preserves ALL columns & Low Stock badges)
   const columns: PdfTableColumn[] = [
-    { header: '#', weight: 0.45, align: 'center' },
-    { header: 'Item Name', weight: 2.5, align: 'left', isBold: true },
-    { header: 'Category', weight: 1.35, align: 'left' },
-    { header: 'Department', weight: 1.35, align: 'left' },
-    { header: 'Current Stock', weight: 1.15, align: 'right', isBold: true },
-    { header: 'Min / Reorder', weight: 1.15, align: 'right' },
-    { header: 'Avg Rate (WAC)', weight: 1.15, align: 'right' },
-    { header: 'Stock Value', weight: 1.25, align: 'right', isBold: true },
-    { header: 'Days of Stock', weight: 0.85, align: 'right' },
-    { header: 'Stock Status', weight: 1.35, align: 'center', isStatusBadge: true },
+    { header: '#', weight: 0.42, align: 'center' },
+    { header: 'Item Name', weight: 2.45, align: 'left', isBold: true },
+    { header: 'Category', weight: 1.15, align: 'left' },
+    { header: 'Department', weight: 1.15, align: 'left' },
+    { header: 'Current\nStock', weight: 1.15, align: 'right', isBold: true },
+    { header: 'Min /\nReorder', weight: 1.1, align: 'right' },
+    { header: 'Avg Rate\n(WAC)', weight: 1.15, align: 'right' },
+    { header: 'Stock\nValue', weight: 1.3, align: 'right', isBold: true },
+    { header: 'Days\nStock', weight: 0.78, align: 'right' },
+    { header: 'Stock\nStatus', weight: 1.35, align: 'center', isStatusBadge: true },
   ];
 
   const rows: (string | number)[][] = enriched.map((entry, idx) => {
@@ -385,7 +385,7 @@ export function buildStockAdjustmentHistoryPdf(options: StockAdjustmentPdfOption
     generatedAt = new Date(),
   } = options;
 
-  const doc = createA4PdfDocument('landscape');
+  const doc = createA4PdfDocument('portrait');
 
   const increases = adjustments.filter((a) => (Number(a.varianceQuantity) || 0) > 0).length;
   const decreases = adjustments.filter((a) => (Number(a.varianceQuantity) || 0) < 0).length;
@@ -412,14 +412,15 @@ export function buildStockAdjustmentHistoryPdf(options: StockAdjustmentPdfOption
     cursorY
   );
 
+  // Portrait-optimized 7-column layout across 190mm printable width
   const columns: PdfTableColumn[] = [
-    { header: 'Date & Time', weight: 1.45, align: 'left' },
-    { header: 'Item Name', weight: 2.2, align: 'left', isBold: true },
-    { header: 'Previous Stock', weight: 1.15, align: 'right' },
-    { header: 'New Stock', weight: 1.15, align: 'right', isBold: true },
-    { header: 'Difference', weight: 1.1, align: 'right', isBold: true },
-    { header: 'Adjustment Reason', weight: 2.3, align: 'left' },
-    { header: 'Adjusted By', weight: 1.35, align: 'left' },
+    { header: 'Date & Time', weight: 1.4, align: 'left' },
+    { header: 'Item Name', weight: 2.05, align: 'left', isBold: true },
+    { header: 'Previous\nStock', weight: 1.05, align: 'right' },
+    { header: 'New\nStock', weight: 1.05, align: 'right', isBold: true },
+    { header: 'Difference', weight: 1.05, align: 'right', isBold: true },
+    { header: 'Adjustment Reason', weight: 2.35, align: 'left' },
+    { header: 'Adjusted By', weight: 1.45, align: 'left' },
   ];
 
   const rows: (string | number)[][] = adjustments.map((adj) => {
@@ -657,9 +658,9 @@ export function buildPurchaseOrderPdf(
   });
 
   // Financial Summary & Authorization Block (kept intact without splitting across page break)
-  const summaryBlockH = isReceivedView && po.actualReceivedTotal ? 38 : 31;
+  const summaryBlockH = isReceivedView && po.actualReceivedTotal ? 40 : 33;
   if (cursorY + summaryBlockH > usableBottomY) {
-    doc.addPage();
+    doc.addPage('a4', 'portrait');
     cursorY = drawStoqoContinuationHeader(doc, headerOptions, `${po.poNumber} — Summary & Authorization`);
   }
 
@@ -695,20 +696,20 @@ export function buildPurchaseOrderPdf(
     );
   }
 
-  cursorY += totalsBoxH + 8;
+  cursorY += totalsBoxH + 7;
 
-  // Terms & Authorization Line
+  // Terms & Authorization Line (wrapped cleanly within A4 Portrait contentWidth)
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(7.6);
-  drawPdfText(
-    doc,
+  doc.setFontSize(7.5);
+  const noteLines = doc.splitTextToSize(
     'Note: All quantities and rates are subject to physical verification and supplier invoice confirmation upon goods receiving.',
-    marginX,
-    cursorY,
-    { color: STOQO_PDF_COLORS.slate600 }
-  );
+    contentWidth
+  ) as string[];
+  noteLines.forEach((line, idx) => {
+    drawPdfText(doc, line, marginX, cursorY + idx * 3.8, { color: STOQO_PDF_COLORS.slate600 });
+  });
 
-  cursorY += 10;
+  cursorY += Math.max(8, noteLines.length * 3.8 + 6);
   doc.setDrawColor(...STOQO_PDF_COLORS.slate400);
   doc.setLineWidth(0.3);
   doc.line(marginX, cursorY, marginX + 68, cursorY);

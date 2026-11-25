@@ -403,9 +403,20 @@ export const PurchasesView: React.FC = () => {
     });
 
     exportToPdf('Inward Purchases & Payment Ledger', activeRestaurant?.name || 'Store', headers, rows, {
-      orientation: 'landscape',
+      orientation: 'portrait',
       restaurantAddress: activeRestaurant?.address,
       timezone: activeRestaurant?.timezone,
+      columns: [
+        { header: 'Bill #', weight: 1.15, align: 'left', isBold: true },
+        { header: 'PO #', weight: 1.05, align: 'left' },
+        { header: 'Date', weight: 1.1, align: 'left' },
+        { header: 'Vendor', weight: 1.85, align: 'left', isBold: true },
+        { header: 'Items', weight: 0.6, align: 'center' },
+        { header: 'Net\nAmount', weight: 1.25, align: 'right', isBold: true },
+        { header: 'Paid', weight: 1.2, align: 'right' },
+        { header: 'Due', weight: 1.2, align: 'right', isBold: true },
+        { header: 'Status', weight: 1.35, align: 'center', isStatusBadge: true },
+      ],
       summaryCards: [
         { label: 'Total Invoices', value: String(filteredPurchases.length), accent: 'navy' },
         { label: 'Total Inward Value', value: fmt(totalNet), accent: 'navy' },

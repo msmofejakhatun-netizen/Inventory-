@@ -160,9 +160,18 @@ export const FifteenDayPlannerView: React.FC = () => {
       p.primaryVendorName || 'Unassigned',
     ]);
     exportToPdf('15-Day Intelligent Purchase Plan', activeRestaurant?.name || 'Store', headers, rows, {
-      orientation: 'landscape',
+      orientation: 'portrait',
       restaurantAddress: activeRestaurant?.address,
       timezone: activeRestaurant?.timezone,
+      columns: [
+        { header: 'Item Name', weight: 2.3, align: 'left', isBold: true },
+        { header: 'In\nStock', weight: 1.05, align: 'right' },
+        { header: 'Daily\nBurn', weight: 1.05, align: 'right' },
+        { header: '15-Day\nNeed', weight: 1.1, align: 'right' },
+        { header: 'Order\nQty', weight: 1.1, align: 'right', isBold: true },
+        { header: 'Est.\nTotal', weight: 1.35, align: 'right', isBold: true },
+        { header: 'Supplier', weight: 1.75, align: 'left' },
+      ],
       summaryCards: [
         { label: 'Items Analyzed', value: String(filteredItems.length), accent: 'navy' },
         { label: 'Items To Reorder', value: String(itemsToOrder), accent: 'orange' },

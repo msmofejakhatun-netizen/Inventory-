@@ -172,9 +172,18 @@ export const EmergencyIssuesView: React.FC = () => {
       fmt(e.value),
     ]);
     exportToPdf('Emergency Mid-Service Issues Report', activeRestaurant?.name || 'Store', headers, rows, {
-      orientation: 'landscape',
+      orientation: 'portrait',
       restaurantAddress: activeRestaurant?.address,
       timezone: activeRestaurant?.timezone,
+      columns: [
+        { header: 'Date &\nTime', weight: 1.35, align: 'left' },
+        { header: 'Department', weight: 1.3, align: 'left' },
+        { header: 'Item Name', weight: 2.0, align: 'left', isBold: true },
+        { header: 'Qty', weight: 0.95, align: 'right', isBold: true },
+        { header: 'Reason', weight: 2.0, align: 'left' },
+        { header: 'Staff', weight: 1.2, align: 'left' },
+        { header: 'Cost\nValue', weight: 1.2, align: 'right', isBold: true },
+      ],
       summaryCards: [
         { label: 'Emergency Pullouts', value: String(emergencies.length), accent: 'orange' },
         { label: 'Total Emergency Cost', value: fmt(totalCost), accent: 'red' },

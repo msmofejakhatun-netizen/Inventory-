@@ -148,9 +148,19 @@ export const PhysicalAuditView: React.FC = () => {
       headers,
       rows,
       {
-        orientation: 'landscape',
+        orientation: 'portrait',
         restaurantAddress: activeRestaurant?.address,
         timezone: activeRestaurant?.timezone,
+        columns: [
+          { header: 'Date &\nTime', weight: 1.25, align: 'left' },
+          { header: 'Item Name', weight: 2.0, align: 'left', isBold: true },
+          { header: 'System\nStock', weight: 1.0, align: 'right' },
+          { header: 'Physical\nCount', weight: 1.0, align: 'right', isBold: true },
+          { header: 'Variance\nQty', weight: 1.0, align: 'right', isBold: true },
+          { header: 'Variance\nValue', weight: 1.2, align: 'right', isBold: true },
+          { header: 'Reason', weight: 1.65, align: 'left' },
+          { header: 'Auditor', weight: 1.2, align: 'left' },
+        ],
         summaryCards: [
           { label: 'Total Counts', value: String(adjustments.length), accent: 'navy' },
           { label: 'Shortages', value: String(shortageCount), accent: 'red' },

@@ -93,8 +93,8 @@ export function buildStoreToKitchenIssuePdf(options: IssueReportPdfOptions): jsP
   const doc = createA4PdfDocument('portrait');
   const pageWidth = doc.internal.pageSize.getWidth(); // 210mm
   const pageHeight = doc.internal.pageSize.getHeight(); // 297mm
-  const marginX = A4_LAYOUT.marginX; // 12mm
-  const contentWidth = pageWidth - marginX * 2; // 186mm
+  const marginX = A4_LAYOUT.marginX; // 10mm
+  const contentWidth = pageWidth - marginX * 2; // 190mm
   const usableBottomY = pageHeight - A4_LAYOUT.footerReservedHeight;
 
   // Order sessions chronologically ascending by selected Issue Date, then creation timestamp
@@ -148,7 +148,7 @@ export function buildStoreToKitchenIssuePdf(options: IssueReportPdfOptions): jsP
   );
 
   const startNewPage = (continuationLabel?: string): number => {
-    doc.addPage();
+    doc.addPage('a4', 'portrait');
     return drawStoqoContinuationHeader(doc, headerOptions, continuationLabel);
   };
 
@@ -610,25 +610,25 @@ export function buildStoreToKitchenIssuePdf(options: IssueReportPdfOptions): jsP
     doc.setFontSize(8.8);
     drawPdfText(doc, 'REPORT SUMMARY', marginX + 4, cursorY + 5.5, { color: ORANGE });
 
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(8);
-    drawPdfText(
-      doc,
-      `Period: ${dateRange.label}  |  Sessions: ${totalSessions}  |  Items Issued: ${totalItemsIssued}`,
-      marginX + 4,
-      cursorY + 11.8,
-      { color: [255, 255, 255] }
-    );
-
+    const grandTotalLabel = `Grand Total: ${formatInrAmount(grandTotalValue, currencySymbol)}`;
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(10.8);
-    drawPdfText(
-      doc,
-      `Grand Total: ${formatInrAmount(grandTotalValue, currencySymbol)}`,
-      marginX + contentWidth - 4,
-      cursorY + 10.5,
-      { align: 'right', color: [255, 255, 255] }
-    );
+    doc.setFontSize(10.4);
+    drawPdfText(doc, grandTotalLabel, marginX + contentWidth - 4, cursorY + 10.5, {
+      align: 'right',
+      color: [255, 255, 255],
+    });
+
+    const summaryMeta = `Period: ${dateRange.label}  |  Sessions: ${totalSessions}  |  Items Issued: ${totalItemsIssued}`;
+    let metaFontSize = 7.8;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(metaFontSize);
+    while (metaFontSize > 6.2 && doc.getTextWidth(summaryMeta) > contentWidth - 68) {
+      metaFontSize -= 0.3;
+      doc.setFontSize(metaFontSize);
+    }
+    drawPdfText(doc, summaryMeta, marginX + 4, cursorY + 11.8, {
+      color: [255, 255, 255],
+    });
   }
 
   // -------------------------------------------------------------------------
