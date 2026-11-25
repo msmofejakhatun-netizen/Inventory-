@@ -156,6 +156,34 @@ export const EmergencyIssuesView: React.FC = () => {
     exportToCsv(`emergency_issues_${activeRestaurant?.name || 'store'}`, headers, rows);
   };
 
+  const handleExportPdf = () => {
+    const sym = activeRestaurant?.currencySymbol || '₹';
+    const fmt = (n: number) =>
+      `${sym}${(Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const totalCost = emergencies.reduce((sum, e) => sum + (Number(e.value) || 0), 0);
+    const headers = ['Date & Time', 'Department', 'Item Name', 'Quantity', 'Reason', 'Staff', 'Cost Value'];
+    const rows = emergencies.map((e) => [
+      new Date(e.createdAt).toLocaleString('en-IN'),
+      e.departmentName || 'Kitchen',
+      e.itemName,
+      `${e.quantity} ${e.unit}`,
+      e.customReason ? `${e.reason} (${e.customReason})` : e.reason,
+      e.staffName || '—',
+      fmt(e.value),
+    ]);
+    exportToPdf('Emergency Mid-Service Issues Report', activeRestaurant?.name || 'Store', headers, rows, {
+      orientation: 'landscape',
+      restaurantAddress: activeRestaurant?.address,
+      timezone: activeRestaurant?.timezone,
+      summaryCards: [
+        { label: 'Emergency Pullouts', value: String(emergencies.length), accent: 'orange' },
+        { label: 'Total Emergency Cost', value: fmt(totalCost), accent: 'red' },
+      ],
+      totalsRow:
+        rows.length > 0 ? ['', '', `TOTAL (${rows.length} Pullouts)`, '', '', '', fmt(totalCost)] : undefined,
+    });
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -187,6 +215,13 @@ export const EmergencyIssuesView: React.FC = () => {
             className="flex items-center gap-1 px-3 py-2 border border-stone-200 hover:bg-stone-50 text-stone-700 rounded-lg text-xs font-semibold"
           >
             <Download className="w-3.5 h-3.5" /> CSV
+          </button>
+          <button
+            id="emergency-issue-pdf-btn"
+            onClick={handleExportPdf}
+            className="flex items-center gap-1 px-3 py-2 bg-[#0D2149] hover:bg-[#17356e] text-white rounded-lg text-xs font-semibold transition-colors"
+          >
+            <Download className="w-3.5 h-3.5" /> PDF
           </button>
         </div>
       </div>

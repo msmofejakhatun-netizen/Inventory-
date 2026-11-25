@@ -156,17 +156,30 @@ export const WastageView: React.FC = () => {
   };
 
   const handleExportPdf = () => {
-    const headers = ['Date', 'Dept', 'Item', 'Qty', 'Loss', 'Reason', 'Staff'];
+    const fmt = (n: number) =>
+      `${currencySymbol}${(Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const totalLoss = filteredWastages.reduce((sum, w) => sum + (Number(w.value) || 0), 0);
+    const headers = ['Date', 'Department', 'Item Name', 'Qty', 'Financial Loss', 'Reason', 'Staff'];
     const rows = filteredWastages.map((w) => [
-      new Date(w.createdAt).toLocaleDateString(),
-      w.departmentName,
+      new Date(w.createdAt).toLocaleDateString('en-IN'),
+      w.departmentName || 'General',
       w.itemName,
       `${w.quantity} ${w.unit}`,
-      `${currencySymbol}${w.value}`,
+      fmt(w.value),
       w.reason,
-      w.staffName,
+      w.staffName || '—',
     ]);
-    exportToPdf('Kitchen Wastage & Loss Audit', activeRestaurant?.name || 'Store', headers, rows);
+    exportToPdf('Kitchen Wastage & Loss Audit', activeRestaurant?.name || 'Store', headers, rows, {
+      orientation: 'portrait',
+      restaurantAddress: activeRestaurant?.address,
+      timezone: activeRestaurant?.timezone,
+      summaryCards: [
+        { label: 'Wastage Incidents', value: String(filteredWastages.length), accent: 'navy' },
+        { label: 'Total Wastage Loss', value: fmt(totalLoss), accent: 'red' },
+      ],
+      totalsRow:
+        rows.length > 0 ? ['', '', `TOTAL (${rows.length} Incidents)`, '', fmt(totalLoss), '', ''] : undefined,
+    });
   };
 
   return (

@@ -119,31 +119,58 @@ export const ReportsView: React.FC = () => {
   };
 
   const exportCurrentReportPdf = () => {
+    const fmt = (n: number) =>
+      `${currencySymbol}${(Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
     if (activeTab === 'CONSUMPTION') {
+      const entries = Object.entries(deptConsumptionMap);
+      const totalVal = entries.reduce((sum, [, d]) => sum + d.totalValue, 0);
+      const totalDispatches = entries.reduce((sum, [, d]) => sum + d.itemsCount, 0);
       const headers = ['Department', 'Total Consumption Value', 'Dispatches'];
-      const rows = Object.entries(deptConsumptionMap).map(([dept, data]) => [
-        dept,
-        `${currencySymbol}${data.totalValue.toFixed(2)}`,
-        data.itemsCount,
-      ]);
-      exportToPdf('Department Consumption Summary', activeRestaurant?.name || 'Store', headers, rows);
+      const rows = entries.map(([dept, data]) => [dept, fmt(data.totalValue), data.itemsCount]);
+      exportToPdf('Department Consumption Summary', activeRestaurant?.name || 'Store', headers, rows, {
+        restaurantAddress: activeRestaurant?.address,
+        timezone: activeRestaurant?.timezone,
+        summaryCards: [
+          { label: 'Departments', value: String(entries.length), accent: 'navy' },
+          { label: 'Total Dispatches', value: String(totalDispatches), accent: 'orange' },
+          { label: 'Total Consumption', value: fmt(totalVal), accent: 'navy' },
+        ],
+        totalsRow: rows.length > 0 ? ['TOTAL', fmt(totalVal), totalDispatches] : undefined,
+      });
     } else if (activeTab === 'PURCHASES') {
+      const entries = Object.entries(vendorPurchaseMap);
+      const totalPurch = entries.reduce((sum, [, d]) => sum + d.totalAmount, 0);
+      const totalDue = entries.reduce((sum, [, d]) => sum + d.currentDue, 0);
+      const totalBills = entries.reduce((sum, [, d]) => sum + d.billsCount, 0);
       const headers = ['Vendor', 'Total Purchases', 'Bills Count', 'Outstanding Due'];
-      const rows = Object.entries(vendorPurchaseMap).map(([v, data]) => [
-        v,
-        `${currencySymbol}${data.totalAmount.toFixed(2)}`,
-        data.billsCount,
-        `${currencySymbol}${data.currentDue.toFixed(2)}`,
-      ]);
-      exportToPdf('Vendor Procurement Ledger', activeRestaurant?.name || 'Store', headers, rows);
+      const rows = entries.map(([v, data]) => [v, fmt(data.totalAmount), data.billsCount, fmt(data.currentDue)]);
+      exportToPdf('Vendor Procurement Ledger', activeRestaurant?.name || 'Store', headers, rows, {
+        restaurantAddress: activeRestaurant?.address,
+        timezone: activeRestaurant?.timezone,
+        summaryCards: [
+          { label: 'Active Vendors', value: String(entries.length), accent: 'navy' },
+          { label: 'Total Procurement', value: fmt(totalPurch), accent: 'navy' },
+          { label: 'Outstanding Due', value: fmt(totalDue), accent: totalDue > 0 ? 'red' : 'green' },
+        ],
+        totalsRow: rows.length > 0 ? ['TOTAL', fmt(totalPurch), totalBills, fmt(totalDue)] : undefined,
+      });
     } else if (activeTab === 'WASTAGE') {
+      const entries = Object.entries(wastageReasonMap);
+      const totalLoss = entries.reduce((sum, [, d]) => sum + d.totalValue, 0);
+      const totalCount = entries.reduce((sum, [, d]) => sum + d.count, 0);
       const headers = ['Wastage Reason', 'Financial Loss', 'Incidents'];
-      const rows = Object.entries(wastageReasonMap).map(([r, data]) => [
-        r,
-        `${currencySymbol}${data.totalValue.toFixed(2)}`,
-        data.count,
-      ]);
-      exportToPdf('Kitchen Wastage & Spoilage Report', activeRestaurant?.name || 'Store', headers, rows);
+      const rows = entries.map(([r, data]) => [r, fmt(data.totalValue), data.count]);
+      exportToPdf('Kitchen Wastage & Spoilage Report', activeRestaurant?.name || 'Store', headers, rows, {
+        restaurantAddress: activeRestaurant?.address,
+        timezone: activeRestaurant?.timezone,
+        summaryCards: [
+          { label: 'Categories', value: String(entries.length), accent: 'navy' },
+          { label: 'Total Incidents', value: String(totalCount), accent: 'orange' },
+          { label: 'Total Wastage Loss', value: fmt(totalLoss), accent: 'red' },
+        ],
+        totalsRow: rows.length > 0 ? ['TOTAL', fmt(totalLoss), totalCount] : undefined,
+      });
     }
   };
 

@@ -224,10 +224,13 @@
       "type": "object",
       "properties": {
         "id": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "issueNumber": { "type": "string", "maxLength": 30 },
         "departmentId": { "type": "string" },
         "departmentName": { "type": "string" },
         "itemId": { "type": "string" },
         "itemName": { "type": "string" },
+        "unit": { "type": "string", "maxLength": 30 },
         "quantity": { "type": "number" },
         "rate": { "type": "number" },
         "value": { "type": "number" },
@@ -240,6 +243,46 @@
         "createdAt": { "type": "string" }
       },
       "required": ["id", "departmentId", "itemId", "quantity", "staffUid", "restaurantId"]
+    },
+    "IssueSession": {
+      "title": "IssueSession",
+      "description": "Multi-item Store to Kitchen issue session with unique Issue ID and separate Manager and Chef/Staff digital signatures",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "issueNumber": { "type": "string", "maxLength": 30 },
+        "issueDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "issueTime": { "type": "string", "maxLength": 10 },
+        "timezone": { "type": "string", "maxLength": 60 },
+        "restaurantId": { "type": "string" },
+        "departmentId": { "type": "string" },
+        "departmentName": { "type": "string", "maxLength": 120 },
+        "shift": { "type": "string", "enum": ["MORNING", "EVENING", "NIGHT", "GENERAL"] },
+        "issuedByUid": { "type": "string" },
+        "issuedByName": { "type": "string", "maxLength": 100 },
+        "issuedByRole": { "type": "string", "enum": ["OWNER", "MANAGER", "STOREKEEPER", "DEPARTMENT_STAFF"] },
+        "receivedByUid": { "type": "string" },
+        "receivedByName": { "type": "string", "maxLength": 100 },
+        "items": { "type": "array" },
+        "totalItems": { "type": "number" },
+        "totalValue": { "type": "number" },
+        "managerSignature": { "type": "object" },
+        "receiverSignature": { "type": "object" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "issueNumber", "issueDate", "restaurantId", "departmentId", "shift", "issuedByUid", "receivedByName", "items", "totalItems", "totalValue", "managerSignature", "receiverSignature", "createdAt"]
+    },
+    "IssueCounter": {
+      "title": "IssueCounter",
+      "description": "Atomic sequential counter for per-restaurant unique Issue IDs (ISS-001, ISS-002, ...)",
+      "type": "object",
+      "properties": {
+        "lastNumber": { "type": "number" },
+        "restaurantId": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["lastNumber", "restaurantId"]
     },
     "EmergencyIssue": {
       "title": "EmergencyIssue",
@@ -529,7 +572,15 @@
     },
     "/restaurants/{restaurantId}/issues/{issueId}": {
       "schema": "Issue",
-      "description": "Stock issued to kitchen departments"
+      "description": "Stock issued to kitchen departments (item-level ledger)"
+    },
+    "/restaurants/{restaurantId}/issueSessions/{sessionId}": {
+      "schema": "IssueSession",
+      "description": "Separate multi-item Store to Kitchen issue sessions with unique Issue IDs and digital signatures"
+    },
+    "/restaurants/{restaurantId}/issueCounters/{counterId}": {
+      "schema": "IssueCounter",
+      "description": "Sequential Issue ID counter per restaurant"
     },
     "/restaurants/{restaurantId}/emergencyIssues/{issueId}": {
       "schema": "EmergencyIssue",

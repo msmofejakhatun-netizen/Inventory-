@@ -145,6 +145,10 @@ export const FifteenDayPlannerView: React.FC = () => {
   };
 
   const handleExportPdf = () => {
+    const fmt = (n: number) =>
+      `${currencySymbol}${(Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const totalEstimatedCost = filteredItems.reduce((sum, p) => sum + (Number(p.estimatedTotalCost) || 0), 0);
+    const itemsToOrder = filteredItems.filter((p) => (Number(p.recommendedPurchaseQty) || 0) > 0).length;
     const headers = ['Item Name', 'In Stock', 'Daily Burn', '15-Day Need', 'Order Qty', 'Est. Total', 'Supplier'];
     const rows = filteredItems.map((p) => [
       p.itemName,
@@ -152,10 +156,23 @@ export const FifteenDayPlannerView: React.FC = () => {
       `${p.averageDailyConsumption} ${p.unit}`,
       `${p.estimatedRequirement15Days} ${p.unit}`,
       `${p.recommendedPurchaseQty} ${p.unit}`,
-      `${currencySymbol}${p.estimatedTotalCost}`,
-      p.primaryVendorName,
+      fmt(p.estimatedTotalCost),
+      p.primaryVendorName || 'Unassigned',
     ]);
-    exportToPdf('15-Day Intelligent Purchase Plan', activeRestaurant?.name || 'Store', headers, rows);
+    exportToPdf('15-Day Intelligent Purchase Plan', activeRestaurant?.name || 'Store', headers, rows, {
+      orientation: 'landscape',
+      restaurantAddress: activeRestaurant?.address,
+      timezone: activeRestaurant?.timezone,
+      summaryCards: [
+        { label: 'Items Analyzed', value: String(filteredItems.length), accent: 'navy' },
+        { label: 'Items To Reorder', value: String(itemsToOrder), accent: 'orange' },
+        { label: 'Est. Procurement Cost', value: fmt(totalEstimatedCost), accent: 'navy' },
+      ],
+      totalsRow:
+        rows.length > 0
+          ? [`TOTAL (${rows.length} Items)`, '', '', '', '', fmt(totalEstimatedCost), '']
+          : undefined,
+    });
   };
 
   return (

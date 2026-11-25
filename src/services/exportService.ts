@@ -1,4 +1,24 @@
 import jsPDF from 'jspdf';
+import { Item, PurchaseOrder, StockCount } from '../types';
+import { getInventoryStockStatus } from './calculations';
+import {
+  A4_LAYOUT,
+  PdfHeaderOptions,
+  PdfOrientation,
+  PdfSummaryCard,
+  PdfTableColumn,
+  STOQO_PDF_COLORS,
+  applyStoqoPageFooters,
+  createA4PdfDocument,
+  drawPdfSummaryCards,
+  drawPdfText,
+  drawStoqoContinuationHeader,
+  drawStoqoPageOneHeader,
+  formatInrAmount,
+  formatPdfDateTime,
+  renderA4Table,
+  resolvePdfStatusBadge,
+} from './pdfDesignSystem';
 
 export function exportToCsv(filename: string, headers: string[], rows: (string | number)[][]) {
   const processCell = (cell: string | number) => {
@@ -26,219 +46,695 @@ export function exportToExcelCompatible(filename: string, headers: string[], row
   exportToCsv(`${filename}_excel`, headers, rows);
 }
 
+function formatQuantityClean(qty: number): string {
+  const safe = Number.isFinite(qty) ? qty : 0;
+  return Number.isInteger(safe) ? String(safe) : Number(safe.toFixed(2)).toString();
+}
+
+function makeSafeFilenameSlug(raw: string): string {
+  return (raw || 'stoqo_report')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_|_$/g, '');
+}
+
+/**
+ * Infers intelligent A4 column widths, alignment, and status badge treatment from header labels.
+ */
+function inferTableColumns(headers: string[], rows: (string | number)[][]): PdfTableColumn[] {
+  return headers.map((header, idx) => {
+    const h = header.trim().toLowerCase();
+
+    if (h === '#' || h === 'no.' || h === 'no' || h === 'sr' || h === 'sr.') {
+      return { header, weight: 0.45, align: 'center' };
+    }
+
+    if (h.includes('status')) {
+      return { header, weight: 1.25, align: 'center', isStatusBadge: true };
+    }
+
+    const isNumericHeader =
+      /\b(rate|value|amount|cost|total|paid|due|balance|qty|quantity|stock|days|variance|loss|count|billed|system|actual|diff|difference|minimum|min|reorder|wac|consumption|need|order|spent|purchase|issued|previous|new)\b/.test(
+        h
+      ) || h.includes('(₹)') || h.includes('₹');
+
+    // Also inspect first few rows if header is ambiguous
+    let sampleNumeric = false;
+    if (!isNumericHeader && rows.length > 0) {
+      const sampleVals = rows
+        .slice(0, 6)
+        .map((r) => String(r[idx] ?? '').trim())
+        .filter(Boolean);
+      if (
+        sampleVals.length > 0 &&
+        sampleVals.every((v) => /^[+-]?(₹|Rs\.?\s*)?[\d,]+(\.\d+)?(\s*(d|days|%))?$/i.test(v))
+      ) {
+        sampleNumeric = true;
+      }
+    }
+
+    const isWideText =
+      /\b(item|name|description|reason|notes|vendor|supplier|category|department|outlet|staff|adjusted by|recorded by|method|reference)\b/.test(
+        h
+      );
+    const isMediumText = /\b(date|time|bill|invoice|phone|voucher|unit|uom)\b/.test(h);
+
+    let weight = 1.1;
+    if (h.includes('item name') || h.includes('description') || h.includes('reason') || h.includes('notes')) {
+      weight = 2.1;
+    } else if (isWideText) {
+      weight = 1.45;
+    } else if (h === 'unit' || h === 'uom') {
+      weight = 0.65;
+    } else if (isMediumText) {
+      weight = 1.05;
+    } else if (isNumericHeader) {
+      weight = 1.1;
+    }
+
+    return {
+      header,
+      weight,
+      align: h === 'unit' || h === 'uom' ? 'center' : isNumericHeader || sampleNumeric ? 'right' : 'left',
+      isBold: idx === 0 && !h.includes('date') && h !== '#',
+    };
+  });
+}
+
+export interface GenericReportPdfOptions {
+  orientation?: PdfOrientation;
+  restaurantAddress?: string;
+  dateRangeLabel?: string;
+  timezone?: string;
+  rightMetaLabel?: string;
+  summaryCards?: PdfSummaryCard[];
+  totalsRow?: (string | number)[];
+  columns?: PdfTableColumn[];
+  highlightStatusRows?: boolean;
+  emptyMessage?: string;
+  generatedAt?: Date;
+}
+
+/**
+ * Builds a standardized, print-ready A4 PDF report using the unified STOQO design system.
+ * Supports unlimited rows across multiple pages with repeated table headers and Page X of Y footers.
+ */
+export function buildGenericReportPdf(
+  title: string,
+  restaurantName: string,
+  headers: string[],
+  rows: (string | number)[][],
+  options?: GenericReportPdfOptions
+): jsPDF {
+  const orientation: PdfOrientation =
+    options?.orientation ?? (headers.length >= 8 ? 'landscape' : 'portrait');
+  const doc = createA4PdfDocument(orientation);
+
+  const generatedAt = options?.generatedAt ?? new Date();
+  const headerOptions: PdfHeaderOptions = {
+    restaurantName: restaurantName || 'Restaurant',
+    restaurantAddress: options?.restaurantAddress,
+    reportTitle: title,
+    dateRangeLabel: options?.dateRangeLabel,
+    generatedAt,
+    timezone: options?.timezone,
+    rightMetaLabel: options?.rightMetaLabel ?? `Total Records: ${rows.length}`,
+  };
+
+  let cursorY = drawStoqoPageOneHeader(doc, headerOptions);
+
+  if (options?.summaryCards && options.summaryCards.length > 0) {
+    cursorY = drawPdfSummaryCards(doc, options.summaryCards, cursorY);
+  }
+
+  const columns = options?.columns ?? inferTableColumns(headers, rows);
+
+  renderA4Table(doc, {
+    columns,
+    rows,
+    totalsRow: options?.totalsRow,
+    startY: cursorY,
+    headerOptions,
+    emptyMessage: options?.emptyMessage ?? 'No records available for this report.',
+    highlightStatusRows: options?.highlightStatusRows ?? false,
+  });
+
+  applyStoqoPageFooters(doc, headerOptions);
+  return doc;
+}
+
 export function exportToPdf(
   title: string,
   restaurantName: string,
   headers: string[],
-  rows: (string | number)[][]
+  rows: (string | number)[][],
+  options?: GenericReportPdfOptions
 ) {
-  const doc = new jsPDF();
-  const pageWidth = doc.internal.pageSize.getWidth();
+  const doc = buildGenericReportPdf(title, restaurantName, headers, rows, options);
+  doc.save(`${makeSafeFilenameSlug(title)}_${new Date().toISOString().slice(0, 10)}.pdf`);
+}
 
-  // Header
-  doc.setFontSize(18);
-  doc.setFont('helvetica', 'bold');
-  doc.text('STOQO — Smart Stock. Smarter Business.', 14, 18);
+// ============================================================================
+// CURRENT STOCK INVENTORY REPORT PDF (Unified Live + PDF Low Stock Status)
+// ============================================================================
 
-  doc.setFontSize(12);
-  doc.setFont('helvetica', 'normal');
-  doc.text(`${restaurantName.toUpperCase()}`, 14, 25);
-  doc.text(`Report: ${title}`, 14, 32);
+export interface CurrentStockPdfEntry {
+  item: Item;
+  categoryName: string;
+  departmentName: string;
+  stockValue: number;
+  daysOfStock?: number;
+  stockDaysLabel?: string;
+  isExcess?: boolean;
+}
 
-  doc.setFontSize(9);
-  doc.setTextColor(100);
-  doc.text(`Generated on: ${new Date().toLocaleString()}`, 14, 38);
-  doc.text('Confidential Restaurant Operational Data', pageWidth - 75, 38);
-  doc.line(14, 41, pageWidth - 14, 41);
+export interface CurrentStockPdfOptions {
+  restaurantName: string;
+  restaurantAddress?: string;
+  timezone?: string;
+  currencySymbol?: string;
+  filterLabel?: string;
+  items: CurrentStockPdfEntry[];
+  generatedAt?: Date;
+}
 
-  // Table rendering
-  doc.setTextColor(20);
-  let startY = 48;
-  const colWidth = (pageWidth - 28) / headers.length;
+/**
+ * Builds the standardized A4 Landscape Current Stock Inventory Report PDF.
+ * Uses `getInventoryStockStatus` (the exact single-source-of-truth logic used by StockView.tsx)
+ * so every item's status (`OUT OF STOCK`, `LOW STOCK`, `IN STOCK`, `INACTIVE`) matches the live screen 100%.
+ */
+export function buildCurrentStockInventoryPdf(options: CurrentStockPdfOptions): jsPDF {
+  const {
+    restaurantName,
+    restaurantAddress,
+    timezone,
+    currencySymbol = '₹',
+    filterLabel,
+    items,
+    generatedAt = new Date(),
+  } = options;
 
-  // Header row
-  doc.setFontSize(9);
-  doc.setFont('helvetica', 'bold');
-  headers.forEach((h, i) => {
-    doc.text(String(h), 14 + i * colWidth, startY);
-  });
-  doc.line(14, startY + 2, pageWidth - 14, startY + 2);
-  startY += 7;
+  const doc = createA4PdfDocument('landscape');
 
-  // Rows
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(8);
-  rows.slice(0, 35).forEach((row) => {
-    if (startY > doc.internal.pageSize.getHeight() - 20) {
-      doc.addPage();
-      startY = 20;
+  // Compute unified status for every row using the shared source-of-truth helper
+  const enriched = items.map((entry) => ({
+    ...entry,
+    statusInfo: getInventoryStockStatus(entry.item, Boolean(entry.isExcess)),
+  }));
+
+  let activeSkusCount = 0;
+  let totalInventoryValue = 0;
+  let lowStockCount = 0;
+  let outOfStockCount = 0;
+  let inStockCount = 0;
+
+  enriched.forEach((entry) => {
+    totalInventoryValue += Number(entry.stockValue) || 0;
+    if (entry.statusInfo.code !== 'INACTIVE') {
+      activeSkusCount += 1;
     }
-    row.forEach((cell, i) => {
-      const text = String(cell ?? '');
-      doc.text(text.substring(0, 22), 14 + i * colWidth, startY);
-    });
-    startY += 6;
+    if (entry.statusInfo.code === 'LOW_STOCK') {
+      lowStockCount += 1;
+    } else if (entry.statusInfo.code === 'OUT_OF_STOCK') {
+      outOfStockCount += 1;
+    } else if (entry.statusInfo.code === 'IN_STOCK') {
+      inStockCount += 1;
+    }
   });
 
-  if (rows.length > 35) {
-    doc.setFontSize(8);
-    doc.setTextColor(120);
-    doc.text(`... and ${rows.length - 35} more records`, 14, startY + 4);
+  const headerOptions: PdfHeaderOptions = {
+    restaurantName: restaurantName || 'Restaurant',
+    restaurantAddress,
+    reportTitle: 'Current Stock Inventory Report',
+    dateRangeLabel: filterLabel
+      ? `As of ${formatPdfDateTime(generatedAt, timezone)}  |  Filter: ${filterLabel}`
+      : `As of ${formatPdfDateTime(generatedAt, timezone)}`,
+    generatedAt,
+    timezone,
+    rightMetaLabel: `Items Listed: ${enriched.length}`,
+  };
+
+  let cursorY = drawStoqoPageOneHeader(doc, headerOptions);
+
+  const summaryCards: PdfSummaryCard[] = [
+    { label: 'Total Active SKUs', value: String(activeSkusCount), accent: 'navy' },
+    {
+      label: 'Total Inventory Value',
+      value: formatInrAmount(totalInventoryValue, currencySymbol),
+      accent: 'navy',
+    },
+    { label: 'Low Stock Items', value: String(lowStockCount), accent: 'orange' },
+    { label: 'Out of Stock Items', value: String(outOfStockCount), accent: 'red' },
+    { label: 'In Stock Items', value: String(inStockCount), accent: 'green' },
+  ];
+
+  cursorY = drawPdfSummaryCards(doc, summaryCards, cursorY);
+
+  const columns: PdfTableColumn[] = [
+    { header: '#', weight: 0.45, align: 'center' },
+    { header: 'Item Name', weight: 2.5, align: 'left', isBold: true },
+    { header: 'Category', weight: 1.35, align: 'left' },
+    { header: 'Department', weight: 1.35, align: 'left' },
+    { header: 'Current Stock', weight: 1.15, align: 'right', isBold: true },
+    { header: 'Min / Reorder', weight: 1.15, align: 'right' },
+    { header: 'Avg Rate (WAC)', weight: 1.15, align: 'right' },
+    { header: 'Stock Value', weight: 1.25, align: 'right', isBold: true },
+    { header: 'Days of Stock', weight: 0.85, align: 'right' },
+    { header: 'Stock Status', weight: 1.35, align: 'center', isStatusBadge: true },
+  ];
+
+  const rows: (string | number)[][] = enriched.map((entry, idx) => {
+    const unit = entry.item.unit || '';
+    const minThreshold = entry.statusInfo.minThreshold;
+    const minDisplay =
+      minThreshold > 0 ? `${formatQuantityClean(minThreshold)} ${unit}` : 'Not Set';
+    const avgRate = entry.item.averageStockRate || entry.item.lastPurchaseRate || 0;
+    const daysDisplay =
+      entry.stockDaysLabel ||
+      (entry.daysOfStock === undefined
+        ? '—'
+        : entry.daysOfStock >= 999
+        ? '999+ d'
+        : `${Math.max(0, Math.round(entry.daysOfStock))} d`);
+
+    return [
+      idx + 1,
+      entry.item.name,
+      entry.categoryName || entry.item.category || 'Uncategorized',
+      entry.departmentName || entry.item.departmentName || 'General Store',
+      `${formatQuantityClean(entry.item.currentStock)} ${unit}`,
+      minDisplay,
+      formatInrAmount(avgRate, currencySymbol),
+      formatInrAmount(entry.stockValue || 0, currencySymbol),
+      daysDisplay,
+      entry.statusInfo.pdfLabel,
+    ];
+  });
+
+  const totalsRow: (string | number)[] = [
+    '',
+    `TOTAL (${enriched.length} ${enriched.length === 1 ? 'Item' : 'Items'})`,
+    '',
+    '',
+    '',
+    '',
+    'Grand Total Value:',
+    formatInrAmount(totalInventoryValue, currencySymbol),
+    '',
+    '',
+  ];
+
+  renderA4Table(doc, {
+    columns,
+    rows,
+    totalsRow: rows.length > 0 ? totalsRow : undefined,
+    startY: cursorY,
+    headerOptions,
+    emptyMessage: 'No inventory items match the selected filters.',
+    highlightStatusRows: true,
+  });
+
+  applyStoqoPageFooters(doc, headerOptions);
+  return doc;
+}
+
+export function exportCurrentStockInventoryPdf(options: CurrentStockPdfOptions): void {
+  const doc = buildCurrentStockInventoryPdf(options);
+  const safeRest = makeSafeFilenameSlug(options.restaurantName || 'stoqo');
+  doc.save(`STOQO_Current_Stock_${safeRest}_${new Date().toISOString().slice(0, 10)}.pdf`);
+}
+
+// ============================================================================
+// STOCK ADJUSTMENT HISTORY REPORT PDF
+// ============================================================================
+
+export interface StockAdjustmentPdfOptions {
+  restaurantName: string;
+  restaurantAddress?: string;
+  timezone?: string;
+  adjustments: StockCount[];
+  generatedAt?: Date;
+}
+
+export function buildStockAdjustmentHistoryPdf(options: StockAdjustmentPdfOptions): jsPDF {
+  const {
+    restaurantName,
+    restaurantAddress,
+    timezone,
+    adjustments,
+    generatedAt = new Date(),
+  } = options;
+
+  const doc = createA4PdfDocument('landscape');
+
+  const increases = adjustments.filter((a) => (Number(a.varianceQuantity) || 0) > 0).length;
+  const decreases = adjustments.filter((a) => (Number(a.varianceQuantity) || 0) < 0).length;
+
+  const headerOptions: PdfHeaderOptions = {
+    restaurantName: restaurantName || 'Restaurant',
+    restaurantAddress,
+    reportTitle: 'Stock Adjustment History Report',
+    dateRangeLabel: `Recorded Adjustments (as of ${formatPdfDateTime(generatedAt, timezone)})`,
+    generatedAt,
+    timezone,
+    rightMetaLabel: `Adjustments: ${adjustments.length}`,
+  };
+
+  let cursorY = drawStoqoPageOneHeader(doc, headerOptions);
+
+  cursorY = drawPdfSummaryCards(
+    doc,
+    [
+      { label: 'Total Adjustments', value: String(adjustments.length), accent: 'navy' },
+      { label: 'Stock Increases (+)', value: String(increases), accent: 'green' },
+      { label: 'Stock Decreases (-)', value: String(decreases), accent: 'red' },
+    ],
+    cursorY
+  );
+
+  const columns: PdfTableColumn[] = [
+    { header: 'Date & Time', weight: 1.45, align: 'left' },
+    { header: 'Item Name', weight: 2.2, align: 'left', isBold: true },
+    { header: 'Previous Stock', weight: 1.15, align: 'right' },
+    { header: 'New Stock', weight: 1.15, align: 'right', isBold: true },
+    { header: 'Difference', weight: 1.1, align: 'right', isBold: true },
+    { header: 'Adjustment Reason', weight: 2.3, align: 'left' },
+    { header: 'Adjusted By', weight: 1.35, align: 'left' },
+  ];
+
+  const rows: (string | number)[][] = adjustments.map((adj) => {
+    const diff = Number(adj.varianceQuantity) || 0;
+    const diffPrefix = diff > 0 ? '+' : '';
+    const unit = adj.unit || '';
+
+    return [
+      formatPdfDateTime(new Date(adj.createdAt), timezone),
+      adj.itemName,
+      `${formatQuantityClean(adj.systemStock)} ${unit}`,
+      `${formatQuantityClean(adj.physicalStock)} ${unit}`,
+      `${diffPrefix}${formatQuantityClean(diff)} ${unit}`,
+      adj.reason || 'Physical Stock Correction',
+      adj.countedByName || 'Authorized User',
+    ];
+  });
+
+  renderA4Table(doc, {
+    columns,
+    rows,
+    startY: cursorY,
+    headerOptions,
+    emptyMessage: 'No manual stock adjustments have been recorded yet.',
+  });
+
+  applyStoqoPageFooters(doc, headerOptions);
+  return doc;
+}
+
+export function exportStockAdjustmentHistoryPdf(options: StockAdjustmentPdfOptions): void {
+  const doc = buildStockAdjustmentHistoryPdf(options);
+  const safeRest = makeSafeFilenameSlug(options.restaurantName || 'stoqo');
+  doc.save(`STOQO_Stock_Adjustments_${safeRest}_${new Date().toISOString().slice(0, 10)}.pdf`);
+}
+
+// ============================================================================
+// PURCHASE ORDER PDF (Standardized A4 Portrait)
+// ============================================================================
+
+export function buildPurchaseOrderPdf(
+  po: PurchaseOrder,
+  restaurantName: string,
+  currencySymbol: string = '₹',
+  restaurantAddress?: string,
+  timezone?: string,
+  generatedAt: Date = new Date()
+): jsPDF {
+  const doc = createA4PdfDocument('portrait');
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const marginX = A4_LAYOUT.marginX;
+  const contentWidth = pageWidth - marginX * 2;
+  const usableBottomY = pageHeight - A4_LAYOUT.footerReservedHeight;
+
+  const isReceivedView = po.status === 'RECEIVED' || po.status === 'PARTIALLY_RECEIVED';
+
+  const headerOptions: PdfHeaderOptions = {
+    restaurantName: restaurantName || 'Restaurant',
+    restaurantAddress,
+    reportTitle: 'Purchase Order',
+    dateRangeLabel: `PO Date: ${formatPdfDateTime(new Date(po.createdAt), timezone)}`,
+    generatedAt,
+    timezone,
+    rightMetaLabel: `PO #: ${po.poNumber}`,
+  };
+
+  let cursorY = drawStoqoPageOneHeader(doc, headerOptions);
+
+  // PO & Supplier Metadata Card
+  const cardHeight = 27;
+  doc.setFillColor(...STOQO_PDF_COLORS.lightBg);
+  doc.setDrawColor(...STOQO_PDF_COLORS.border);
+  doc.setLineWidth(0.25);
+  doc.roundedRect(marginX, cursorY, contentWidth, cardHeight, 1.5, 1.5, 'FD');
+
+  const leftColX = marginX + 3.5;
+  const rightColX = marginX + contentWidth / 2 + 4;
+
+  // Status badge top-right inside card
+  const statusBadge = resolvePdfStatusBadge(po.status.replace(/_/g, ' ')) ?? {
+    label: po.status.replace(/_/g, ' '),
+    fill: STOQO_PDF_COLORS.greyFill,
+    border: STOQO_PDF_COLORS.greyBorder,
+    text: STOQO_PDF_COLORS.greyText,
+  };
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7);
+  const badgeW = Math.max(24, doc.getTextWidth(statusBadge.label) + 6);
+  const badgeX = marginX + contentWidth - badgeW - 3.5;
+  doc.setFillColor(...statusBadge.fill);
+  doc.setDrawColor(...statusBadge.border);
+  doc.roundedRect(badgeX, cursorY + 3, badgeW, 5.2, 1.2, 1.2, 'FD');
+  drawPdfText(doc, statusBadge.label, badgeX + badgeW / 2, cursorY + 6.6, {
+    align: 'center',
+    color: statusBadge.text,
+  });
+
+  // Left column details
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8.5);
+  drawPdfText(doc, `PO Number: ${po.poNumber}`, leftColX, cursorY + 6.5, {
+    color: STOQO_PDF_COLORS.navy,
+  });
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8.2);
+  drawPdfText(doc, `Supplier: ${po.vendorName}`, leftColX, cursorY + 12.8, {
+    color: STOQO_PDF_COLORS.slate900,
+  });
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.8);
+  drawPdfText(
+    doc,
+    `Phone: ${po.vendorPhone || 'Not provided'}`,
+    leftColX,
+    cursorY + 18.8,
+    { color: STOQO_PDF_COLORS.slate600 }
+  );
+
+  drawPdfText(
+    doc,
+    `Line Items: ${po.items.length}`,
+    leftColX,
+    cursorY + 24.2,
+    { color: STOQO_PDF_COLORS.slate600 }
+  );
+
+  // Right column details
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.8);
+  if (po.sentAt) {
+    drawPdfText(
+      doc,
+      `Sent: ${formatPdfDateTime(new Date(po.sentAt), timezone)}`,
+      rightColX,
+      cursorY + 12.8,
+      { color: STOQO_PDF_COLORS.slate700 }
+    );
+  }
+  if (po.receivedAt) {
+    drawPdfText(
+      doc,
+      `Received: ${formatPdfDateTime(new Date(po.receivedAt), timezone)}`,
+      rightColX,
+      cursorY + 18.8,
+      { color: STOQO_PDF_COLORS.slate700 }
+    );
+  }
+  if (po.billNumber) {
+    doc.setFont('helvetica', 'bold');
+    drawPdfText(
+      doc,
+      `Invoice / Bill No: ${po.billNumber}`,
+      rightColX,
+      cursorY + 24.2,
+      { color: STOQO_PDF_COLORS.navy }
+    );
   }
 
-  doc.save(`${title.toLowerCase().replace(/\s+/g, '_')}_${new Date().toISOString().slice(0, 10)}.pdf`);
+  cursorY += cardHeight + 5;
+
+  // PO Items Table
+  const columns: PdfTableColumn[] = isReceivedView
+    ? [
+        { header: '#', weight: 0.45, align: 'center' },
+        { header: 'Item Description', weight: 2.6, align: 'left', isBold: true },
+        { header: 'Ordered', weight: 1.0, align: 'right' },
+        { header: 'Received', weight: 1.0, align: 'right', isBold: true },
+        { header: 'Missing', weight: 0.9, align: 'right' },
+        { header: 'Actual Rate', weight: 1.15, align: 'right' },
+        { header: 'Actual Amt', weight: 1.25, align: 'right', isBold: true },
+      ]
+    : [
+        { header: '#', weight: 0.5, align: 'center' },
+        { header: 'Item Description', weight: 3.4, align: 'left', isBold: true },
+        { header: 'Order Qty', weight: 1.25, align: 'right', isBold: true },
+        { header: 'Est. Rate', weight: 1.25, align: 'right' },
+        { header: 'Est. Amount', weight: 1.4, align: 'right', isBold: true },
+      ];
+
+  const rows: (string | number)[][] = po.items.map((item, idx) => {
+    const ordered = item.orderedQty ?? item.recommendedQuantity ?? 0;
+    const estRate = item.estimatedRate ?? 0;
+    const estAmt = item.estimatedAmount ?? ordered * estRate;
+
+    if (isReceivedView) {
+      const recv = item.receivedQty ?? 0;
+      const missing = item.missingQty ?? 0;
+      const actualRate = item.actualRate ?? estRate;
+      const actualAmt = item.actualAmount ?? recv * actualRate;
+      return [
+        idx + 1,
+        item.itemName,
+        `${formatQuantityClean(ordered)} ${item.unit}`,
+        `${formatQuantityClean(recv)} ${item.unit}`,
+        `${formatQuantityClean(missing)} ${item.unit}`,
+        formatInrAmount(actualRate, currencySymbol),
+        formatInrAmount(actualAmt, currencySymbol),
+      ];
+    }
+
+    return [
+      idx + 1,
+      item.itemName,
+      `${formatQuantityClean(ordered)} ${item.unit}`,
+      formatInrAmount(estRate, currencySymbol),
+      formatInrAmount(estAmt, currencySymbol),
+    ];
+  });
+
+  const totalEst = po.estimatedTotal ?? po.totalEstimatedAmount ?? 0;
+  const totalRecv = po.actualReceivedTotal ?? 0;
+
+  const totalsRow: (string | number)[] = isReceivedView
+    ? [
+        '',
+        'TOTAL RECEIVED VALUE',
+        '',
+        '',
+        '',
+        '',
+        formatInrAmount(totalRecv || totalEst, currencySymbol),
+      ]
+    : ['', 'TOTAL ESTIMATED VALUE', '', '', formatInrAmount(totalEst, currencySymbol)];
+
+  cursorY = renderA4Table(doc, {
+    columns,
+    rows,
+    totalsRow: rows.length > 0 ? totalsRow : undefined,
+    startY: cursorY,
+    headerOptions,
+    emptyMessage: 'No line items in this Purchase Order.',
+  });
+
+  // Financial Summary & Authorization Block (kept intact without splitting across page break)
+  const summaryBlockH = isReceivedView && po.actualReceivedTotal ? 38 : 31;
+  if (cursorY + summaryBlockH > usableBottomY) {
+    doc.addPage();
+    cursorY = drawStoqoContinuationHeader(doc, headerOptions, `${po.poNumber} — Summary & Authorization`);
+  }
+
+  // Right-aligned totals breakdown box
+  const totalsBoxW = 78;
+  const totalsBoxX = pageWidth - marginX - totalsBoxW;
+  const totalsBoxH = isReceivedView && po.actualReceivedTotal ? 16 : 10;
+
+  doc.setFillColor(...STOQO_PDF_COLORS.lightBg);
+  doc.setDrawColor(...STOQO_PDF_COLORS.border);
+  doc.roundedRect(totalsBoxX, cursorY, totalsBoxW, totalsBoxH, 1.5, 1.5, 'FD');
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8.2);
+  drawPdfText(doc, 'Estimated PO Total:', totalsBoxX + 3, cursorY + 6.2, {
+    color: STOQO_PDF_COLORS.slate700,
+  });
+  drawPdfText(doc, formatInrAmount(totalEst, currencySymbol), totalsBoxX + totalsBoxW - 3, cursorY + 6.2, {
+    align: 'right',
+    color: STOQO_PDF_COLORS.navy,
+  });
+
+  if (isReceivedView && po.actualReceivedTotal) {
+    drawPdfText(doc, 'Actual Received Total:', totalsBoxX + 3, cursorY + 12.6, {
+      color: STOQO_PDF_COLORS.green,
+    });
+    drawPdfText(
+      doc,
+      formatInrAmount(po.actualReceivedTotal, currencySymbol),
+      totalsBoxX + totalsBoxW - 3,
+      cursorY + 12.6,
+      { align: 'right', color: STOQO_PDF_COLORS.green }
+    );
+  }
+
+  cursorY += totalsBoxH + 8;
+
+  // Terms & Authorization Line
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.6);
+  drawPdfText(
+    doc,
+    'Note: All quantities and rates are subject to physical verification and supplier invoice confirmation upon goods receiving.',
+    marginX,
+    cursorY,
+    { color: STOQO_PDF_COLORS.slate600 }
+  );
+
+  cursorY += 10;
+  doc.setDrawColor(...STOQO_PDF_COLORS.slate400);
+  doc.setLineWidth(0.3);
+  doc.line(marginX, cursorY, marginX + 68, cursorY);
+  doc.line(pageWidth - marginX - 68, cursorY, pageWidth - marginX, cursorY);
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.5);
+  drawPdfText(doc, 'Prepared / Authorized By (Store Manager)', marginX, cursorY + 4, {
+    color: STOQO_PDF_COLORS.navy,
+  });
+  drawPdfText(doc, 'Supplier Acknowledgement', pageWidth - marginX, cursorY + 4, {
+    align: 'right',
+    color: STOQO_PDF_COLORS.navy,
+  });
+
+  applyStoqoPageFooters(doc, headerOptions);
+  return doc;
 }
 
 export function exportPurchaseOrderPdf(
-  po: import('../types').PurchaseOrder,
+  po: PurchaseOrder,
   restaurantName: string,
   currencySymbol: string = '₹',
-  restaurantAddress?: string
+  restaurantAddress?: string,
+  timezone?: string
 ) {
-  const doc = new jsPDF();
-  const pageWidth = doc.internal.pageSize.getWidth();
-
-  // Document Title
-  doc.setFontSize(20);
-  doc.setFont('helvetica', 'bold');
-  doc.setTextColor(30, 41, 59);
-  doc.text('PURCHASE ORDER', 14, 20);
-
-  // Status Badge
-  doc.setFontSize(10);
-  doc.setFont('helvetica', 'bold');
-  const statusColors: Record<string, [number, number, number]> = {
-    DRAFT: [120, 113, 108],
-    PENDING_SEND: [217, 119, 6],
-    SENT: [22, 163, 74],
-    RECEIVED: [13, 148, 136],
-    PARTIALLY_RECEIVED: [37, 99, 235],
-    CANCELLED: [220, 38, 38],
-  };
-  const badgeColor = statusColors[po.status] || [100, 100, 100];
-  doc.setTextColor(badgeColor[0], badgeColor[1], badgeColor[2]);
-  doc.text(`STATUS: ${po.status}`, pageWidth - 60, 20);
-
-  // Restaurant details
-  doc.setTextColor(50, 50, 50);
-  doc.setFontSize(12);
-  doc.setFont('helvetica', 'bold');
-  doc.text(restaurantName.toUpperCase(), 14, 28);
-
-  doc.setFontSize(8);
-  doc.setFont('helvetica', 'normal');
-  doc.setTextColor(100, 100, 100);
-  if (restaurantAddress) {
-    doc.text(restaurantAddress, 14, 33);
-  }
-  doc.text(`PO Date: ${new Date(po.createdAt).toLocaleDateString()} ${new Date(po.createdAt).toLocaleTimeString()}`, 14, 38);
-
-  // PO & Vendor Details Card
-  doc.setDrawColor(226, 232, 240);
-  doc.setFillColor(248, 250, 252);
-  doc.rect(14, 42, pageWidth - 28, 26, 'FD');
-
-  doc.setFontSize(9);
-  doc.setFont('helvetica', 'bold');
-  doc.setTextColor(15, 23, 42);
-  doc.text(`PO Number: ${po.poNumber}`, 18, 49);
-  doc.text(`Supplier: ${po.vendorName}`, 18, 56);
-  if (po.vendorPhone) {
-    doc.text(`Phone: ${po.vendorPhone}`, 18, 63);
-  }
-
-  const rightColX = pageWidth / 2 + 10;
-  if (po.sentAt) {
-    doc.text(`Sent Date: ${new Date(po.sentAt).toLocaleString()}`, rightColX, 49);
-  }
-  if (po.receivedAt) {
-    doc.text(`Received Date: ${new Date(po.receivedAt).toLocaleString()}`, rightColX, 56);
-  }
-  if (po.billNumber) {
-    doc.text(`Invoice / Bill No: ${po.billNumber}`, rightColX, 63);
-  }
-
-  // Table Headers
-  let startY = 76;
-  doc.setFillColor(241, 245, 249);
-  doc.rect(14, startY - 5, pageWidth - 28, 7, 'F');
-  doc.setFontSize(8);
-  doc.setFont('helvetica', 'bold');
-  doc.setTextColor(71, 85, 105);
-
-  const isReceivedView = po.status === 'RECEIVED' || po.status === 'PARTIALLY_RECEIVED';
-  doc.text('#', 16, startY);
-  doc.text('Item Description', 24, startY);
-  doc.text('Ordered', 90, startY);
-  if (isReceivedView) {
-    doc.text('Recv', 110, startY);
-    doc.text('Missing', 125, startY);
-    doc.text('Actual Rate', 145, startY);
-    doc.text('Actual Amt', pageWidth - 35, startY);
-  } else {
-    doc.text('Est. Rate', 130, startY);
-    doc.text('Est. Amount', pageWidth - 35, startY);
-  }
-  doc.line(14, startY + 2, pageWidth - 14, startY + 2);
-  startY += 7;
-
-  // Items
-  doc.setFont('helvetica', 'normal');
-  doc.setTextColor(15, 23, 42);
-  po.items.forEach((item, index) => {
-    if (startY > doc.internal.pageSize.getHeight() - 30) {
-      doc.addPage();
-      startY = 20;
-    }
-    const ordered = item.orderedQty ?? item.recommendedQuantity ?? 0;
-    const estRate = item.estimatedRate ?? 0;
-    const estAmt = item.estimatedAmount ?? (ordered * estRate);
-
-    doc.text(String(index + 1), 16, startY);
-    doc.text(item.itemName.substring(0, 32), 24, startY);
-    doc.text(`${ordered} ${item.unit}`, 90, startY);
-
-    if (isReceivedView) {
-      doc.text(`${item.receivedQty ?? 0} ${item.unit}`, 110, startY);
-      doc.text(`${item.missingQty ?? 0} ${item.unit}`, 125, startY);
-      doc.text(`${currencySymbol}${(item.actualRate ?? estRate).toFixed(2)}`, 145, startY);
-      doc.text(`${currencySymbol}${(item.actualAmount ?? (item.receivedQty ?? 0) * (item.actualRate ?? estRate)).toFixed(2)}`, pageWidth - 35, startY);
-    } else {
-      doc.text(`${currencySymbol}${estRate.toFixed(2)}`, 130, startY);
-      doc.text(`${currencySymbol}${estAmt.toFixed(2)}`, pageWidth - 35, startY);
-    }
-    startY += 6;
-  });
-
-  // Totals Box
-  startY += 4;
-  doc.line(14, startY, pageWidth - 14, startY);
-  startY += 7;
-
-  const totalEst = po.estimatedTotal ?? po.totalEstimatedAmount ?? 0;
-  doc.setFontSize(10);
-  doc.setFont('helvetica', 'bold');
-  doc.text(`Total Estimated Value:`, pageWidth - 90, startY);
-  doc.text(`${currencySymbol}${totalEst.toFixed(2)}`, pageWidth - 35, startY);
-
-  if (isReceivedView && po.actualReceivedTotal) {
-    startY += 6;
-    doc.setTextColor(13, 148, 136);
-    doc.text(`Total Received Value:`, pageWidth - 90, startY);
-    doc.text(`${currencySymbol}${po.actualReceivedTotal.toFixed(2)}`, pageWidth - 35, startY);
-  }
-
-  // Footer / Notes
-  startY += 20;
-  if (startY > doc.internal.pageSize.getHeight() - 30) {
-    doc.addPage();
-    startY = 20;
-  }
-  doc.setFontSize(8);
-  doc.setFont('helvetica', 'normal');
-  doc.setTextColor(100, 100, 100);
-  doc.text('Generated via STOQO. All rates subject to invoice verification upon store entry.', 14, startY);
-  doc.text('Authorized Signature / Store Manager: _______________________________', 14, startY + 12);
-
-  doc.save(`${po.poNumber}_${po.vendorName.replace(/\s+/g, '_')}.pdf`);
+  const doc = buildPurchaseOrderPdf(po, restaurantName, currencySymbol, restaurantAddress, timezone);
+  doc.save(`${po.poNumber}_${po.vendorName.replace(/[^a-zA-Z0-9]+/g, '_')}.pdf`);
 }

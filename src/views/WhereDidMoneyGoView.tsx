@@ -191,24 +191,36 @@ export const WhereDidMoneyGoView: React.FC = () => {
   };
 
   const handleExportPdf = () => {
+    const fmt = (n: number) =>
+      `${currencySymbol}${(Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     const headers = ['Financial Dimension / Station', 'Amount', 'Share %'];
     const rows: (string | number)[][] = [
-      ['Opening Stock Value', `${currencySymbol}${moneyAnalysis.openingStockValue.toFixed(2)}`, '—'],
-      ['Purchases Value (Inward)', `${currencySymbol}${moneyAnalysis.purchasesValue.toFixed(2)}`, '—'],
-      ['Closing Stock Value', `${currencySymbol}${moneyAnalysis.closingStockValue.toFixed(2)}`, '—'],
-      ['Total Stock Consumed', `${currencySymbol}${moneyAnalysis.stockConsumed.toFixed(2)}`, '100%'],
-      ['Wastage Loss', `${currencySymbol}${moneyAnalysis.wastageValue.toFixed(2)}`, `${moneyAnalysis.wastagePercent}%`],
+      ['Opening Stock Value', fmt(moneyAnalysis.openingStockValue), '—'],
+      ['Purchases Value (Inward)', fmt(moneyAnalysis.purchasesValue), '—'],
+      ['Closing Stock Value', fmt(moneyAnalysis.closingStockValue), '—'],
+      ['Total Stock Consumed', fmt(moneyAnalysis.stockConsumed), '100%'],
+      ['Wastage Loss', fmt(moneyAnalysis.wastageValue), `${moneyAnalysis.wastagePercent}%`],
     ];
 
     moneyAnalysis.departmentBreakdown.forEach((dept) => {
-      rows.push([`Dept: ${dept.name}`, `${currencySymbol}${dept.value.toFixed(2)}`, `${dept.percent}%`]);
+      rows.push([`Dept: ${dept.name}`, fmt(dept.value), `${dept.percent}%`]);
     });
 
     exportToPdf(
       'Where Did My Money Go - Stock Consumption Audit',
       activeRestaurant?.name || 'Store',
       headers,
-      rows
+      rows,
+      {
+        restaurantAddress: activeRestaurant?.address,
+        timezone: activeRestaurant?.timezone,
+        summaryCards: [
+          { label: 'Inward Purchases', value: fmt(moneyAnalysis.purchasesValue), accent: 'navy' },
+          { label: 'Total Consumed', value: fmt(moneyAnalysis.stockConsumed), accent: 'orange' },
+          { label: 'Closing Stock', value: fmt(moneyAnalysis.closingStockValue), accent: 'green' },
+          { label: 'Wastage Loss', value: fmt(moneyAnalysis.wastageValue), accent: 'red' },
+        ],
+      }
     );
   };
 

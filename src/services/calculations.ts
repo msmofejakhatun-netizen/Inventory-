@@ -389,3 +389,95 @@ export function getPurchasePaymentInfo(purchase: Purchase): {
   }
 }
 
+export type InventoryStockStatusCode = 'INACTIVE' | 'OUT_OF_STOCK' | 'LOW_STOCK' | 'IN_STOCK';
+
+export interface InventoryStockStatusInfo {
+  code: InventoryStockStatusCode;
+  pdfLabel: 'INACTIVE' | 'OUT OF STOCK' | 'LOW STOCK' | 'IN STOCK';
+  uiLabel: 'Inactive' | 'Out of Stock' | 'Low Stock' | 'In Stock';
+  filterBucket: 'LOW' | 'EXCESS' | 'SUFFICIENT';
+  minThreshold: number;
+  isOutOfStock: boolean;
+  isLowStock: boolean;
+  isInStock: boolean;
+  isInactive: boolean;
+  isExcess: boolean;
+}
+
+/**
+ * Single source of truth for Inventory Stock Status shared across the live Current Stock UI
+ * and Current Stock Inventory PDF report.
+ * Respects existing minimumStock, reorderLevel, inactive status, and excess stock rules.
+ */
+export function getInventoryStockStatus(
+  item: Pick<Item, 'currentStock' | 'minimumStock' | 'reorderLevel' | 'status'>,
+  isExcess: boolean = false
+): InventoryStockStatusInfo {
+  const currentStock = Number(item.currentStock) || 0;
+  const minThreshold =
+    Number(item.minimumStock) > 0
+      ? Number(item.minimumStock)
+      : Number(item.reorderLevel) > 0
+      ? Number(item.reorderLevel)
+      : 0;
+
+  if (item.status === 'inactive') {
+    return {
+      code: 'INACTIVE',
+      pdfLabel: 'INACTIVE',
+      uiLabel: 'Inactive',
+      filterBucket: 'SUFFICIENT',
+      minThreshold,
+      isOutOfStock: false,
+      isLowStock: false,
+      isInStock: false,
+      isInactive: true,
+      isExcess: false,
+    };
+  }
+
+  if (currentStock <= 0) {
+    return {
+      code: 'OUT_OF_STOCK',
+      pdfLabel: 'OUT OF STOCK',
+      uiLabel: 'Out of Stock',
+      filterBucket: 'LOW',
+      minThreshold,
+      isOutOfStock: true,
+      isLowStock: false,
+      isInStock: false,
+      isInactive: false,
+      isExcess: false,
+    };
+  }
+
+  if (minThreshold > 0 && currentStock <= minThreshold) {
+    return {
+      code: 'LOW_STOCK',
+      pdfLabel: 'LOW STOCK',
+      uiLabel: 'Low Stock',
+      filterBucket: 'LOW',
+      minThreshold,
+      isOutOfStock: false,
+      isLowStock: true,
+      isInStock: false,
+      isInactive: false,
+      isExcess: false,
+    };
+  }
+
+  return {
+    code: 'IN_STOCK',
+    pdfLabel: 'IN STOCK',
+    uiLabel: 'In Stock',
+    filterBucket: isExcess ? 'EXCESS' : 'SUFFICIENT',
+    minThreshold,
+    isOutOfStock: false,
+    isLowStock: false,
+    isInStock: true,
+    isInactive: false,
+    isExcess,
+  };
+}
+
+

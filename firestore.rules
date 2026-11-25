@@ -64,6 +64,57 @@ service cloud.firestore {
              !val.matches('.*[<>].*');
     }
 
+    function isValidIssueSignature(sig) {
+      return sig is map &&
+             sig.status in ['PENDING', 'SIGNED'] && (
+               sig.status == 'PENDING' || (
+                 sig.signerUid is string &&
+                 sig.signerUid == request.auth.uid &&
+                 sig.signerName is string &&
+                 sig.signerName.trim().size() > 0 &&
+                 sig.signerName.size() <= 100 &&
+                 sig.signedAt is string &&
+                 sig.signatureDataUrl is string &&
+                 sig.signatureDataUrl.matches('^data:image/png;base64,.*') &&
+                 sig.signatureDataUrl.size() <= 130000
+               )
+             );
+    }
+
+    function isValidIssueSessionCreate(data, restaurantId) {
+      return data.restaurantId == restaurantId &&
+             data.issuedByUid == request.auth.uid &&
+             data.issueNumber is string &&
+             data.issueNumber.size() >= 4 &&
+             data.issueNumber.size() <= 30 &&
+             data.issueDate is string &&
+             data.issueDate.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
+             data.departmentId is string &&
+             data.departmentId.size() > 0 &&
+             data.departmentName is string &&
+             data.departmentName.size() > 0 &&
+             data.departmentName.size() <= 120 &&
+             data.shift in ['MORNING', 'EVENING', 'NIGHT', 'GENERAL'] &&
+             data.receivedByName is string &&
+             data.receivedByName.trim().size() > 0 &&
+             data.receivedByName.size() <= 100 &&
+             data.items is list &&
+             data.items.size() >= 1 &&
+             data.items.size() <= 50 &&
+             data.totalItems is int &&
+             data.totalItems == data.items.size() &&
+             data.totalValue is number &&
+             data.totalValue >= 0 &&
+             data.receiverSignature is map &&
+             data.receiverSignature.status == 'PENDING' &&
+             data.managerSignature is map && (
+               data.managerSignature.status == 'PENDING' || (
+                 isRestaurantManager(restaurantId) &&
+                 isValidIssueSignature(data.managerSignature)
+               )
+             );
+    }
+
     // Root user profiles
     match /users/{userId} {
       allow get: if isUser(userId);
@@ -315,11 +366,56 @@ service cloud.firestore {
         allow update, delete: if false; // Immutable ledger
       }
 
-      // Issues to departments
+      // Issues to departments (item-level ledger records)
       match /issues/{issueId} {
         allow get, list: if isMemberOfRestaurant(restaurantId);
         allow create, update: if isStorekeeper(restaurantId);
         allow delete: if isRestaurantOwner(restaurantId);
+      }
+
+      // Sequential Issue Session Counter (per restaurant)
+      match /issueCounters/{counterId} {
+        allow get: if isStorekeeper(restaurantId);
+        allow list: if false;
+        allow create, update: if isStorekeeper(restaurantId) &&
+          request.resource.data.restaurantId == restaurantId &&
+          request.resource.data.lastNumber is int &&
+          request.resource.data.lastNumber >= 1;
+        allow delete: if false;
+      }
+
+      // Store to Kitchen Issue Sessions (multi-item sessions with separate Manager & Chef/Staff signatures)
+      match /issueSessions/{sessionId} {
+        allow get, list: if isMemberOfRestaurant(restaurantId);
+        allow create: if isStorekeeper(restaurantId) &&
+          isValidIssueSessionCreate(request.resource.data, restaurantId);
+        allow update: if isMemberOfRestaurant(restaurantId) && (
+          // Manager / Owner capturing Manager Signature (separate approval from Receiver)
+          (
+            isRestaurantManager(restaurantId) &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['managerSignature', 'updatedAt']) &&
+            resource.data.managerSignature.status == 'PENDING' &&
+            request.resource.data.managerSignature.status == 'SIGNED' &&
+            isValidIssueSignature(request.resource.data.managerSignature) &&
+            resource.data.receiverSignature.get('signerUid', '') != request.auth.uid
+          ) ||
+          // Authorized Chef / Department Staff (or explicitly named receiver) capturing Receiving Signature
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['receiverSignature', 'updatedAt']) &&
+            resource.data.receiverSignature.status == 'PENDING' &&
+            request.resource.data.receiverSignature.status == 'SIGNED' &&
+            isValidIssueSignature(request.resource.data.receiverSignature) &&
+            resource.data.managerSignature.get('signerUid', '') != request.auth.uid &&
+            (
+              resource.data.get('receivedByUid', '') == request.auth.uid || (
+                (resource.data.get('receivedByUid', null) == null || resource.data.get('receivedByUid', '') == '') &&
+                exists(/databases/$(database)/documents/restaurants/$(restaurantId)/users/$(request.auth.uid)) &&
+                getRestaurantUser(restaurantId).role == 'DEPARTMENT_STAFF'
+              )
+            )
+          )
+        );
+        allow delete: if false; // Preserve confirmed issue session history
       }
 
       // Emergency Issues

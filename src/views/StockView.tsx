@@ -36,8 +36,13 @@ import {
   calculateAverageDailyConsumption,
   calculateStockDays,
   calculateExcessStock,
+  getInventoryStockStatus,
 } from '../services/calculations';
-import { exportToCsv, exportToPdf } from '../services/exportService';
+import {
+  exportToCsv,
+  exportCurrentStockInventoryPdf,
+  exportStockAdjustmentHistoryPdf,
+} from '../services/exportService';
 import {
   deleteInventoryItemSafely,
   bulkDeleteInventoryItemsSafely,
@@ -277,22 +282,19 @@ export const StockView: React.FC = () => {
       const { avgDailyQty, hasData } = calculateAverageDailyConsumption(issues, item.id, 14);
       const stockDaysObj = calculateStockDays(item.currentStock, avgDailyQty);
       const excessObj = calculateExcessStock(item, avgDailyQty);
-
-      let statusType: 'LOW' | 'EXCESS' | 'SUFFICIENT' = 'SUFFICIENT';
-      if (item.minimumStock > 0 && item.currentStock <= item.minimumStock) {
-        statusType = 'LOW';
-      } else if (excessObj.isExcess) {
-        statusType = 'EXCESS';
-      }
+      const stockStatus = getInventoryStockStatus(item, excessObj.isExcess);
 
       return {
         ...item,
         stockValue: value,
         avgDailyQty,
         hasConsumptionData: hasData,
+        stockDaysValue: stockDaysObj.days,
         stockDaysLabel: stockDaysObj.label,
         excessValue: excessObj.excessValue,
-        statusType,
+        isExcess: excessObj.isExcess,
+        stockStatus,
+        statusType: stockStatus.filterBucket,
       };
     });
   }, [items, issues]);
@@ -738,32 +740,80 @@ export const StockView: React.FC = () => {
   };
 
   const handleExportCsv = () => {
-    const headers = ['Item Name', 'Category', 'Unit', 'Current Stock', 'Avg Rate', 'Stock Value', 'Stock Days', 'Status'];
+    const headers = [
+      'Item Name',
+      'Category',
+      'Department',
+      'Unit',
+      'Current Stock',
+      'Min / Reorder Level',
+      'Avg Rate',
+      'Stock Value',
+      'Stock Days',
+      'Stock Status',
+    ];
     const rows = filteredItems.map((i) => [
       i.name,
       i.category,
+      i.departmentName || 'General Store',
       i.unit,
       i.currentStock,
+      i.stockStatus.minThreshold > 0 ? i.stockStatus.minThreshold : 'Not Set',
       i.averageStockRate || i.lastPurchaseRate,
       i.stockValue,
       i.stockDaysLabel,
-      i.status === 'inactive' ? 'ARCHIVED' : i.statusType,
+      i.stockStatus.pdfLabel,
     ]);
     exportToCsv(`stock_inventory_${activeRestaurant?.name || 'store'}`, headers, rows);
   };
 
   const handleExportPdf = () => {
-    const headers = ['Item Name', 'Category', 'Unit', 'Stock', 'Rate', 'Value', 'Days'];
-    const rows = filteredItems.map((i) => [
-      i.name,
-      i.category,
-      i.unit,
-      i.currentStock,
-      `${currencySymbol}${i.averageStockRate || i.lastPurchaseRate}`,
-      `${currencySymbol}${i.stockValue}`,
-      i.stockDaysLabel,
-    ]);
-    exportToPdf('Current Stock Inventory Report', activeRestaurant?.name || 'Store', headers, rows);
+    const filterParts: string[] = [];
+    if (selectedDept !== 'ALL') {
+      const deptName = departments.find((d) => d.id === selectedDept)?.name || 'Selected Dept';
+      filterParts.push(`Dept: ${deptName}`);
+    }
+    if (selectedStatus !== 'ALL') {
+      filterParts.push(
+        selectedStatus === 'LOW'
+          ? 'Low / Out of Stock'
+          : selectedStatus === 'EXCESS'
+          ? 'Excess Stock'
+          : 'In Stock'
+      );
+    }
+    if (showArchived) {
+      filterParts.push('Includes Inactive');
+    }
+    if (searchQuery.trim()) {
+      filterParts.push(`Search: "${searchQuery.trim()}"`);
+    }
+
+    exportCurrentStockInventoryPdf({
+      restaurantName: activeRestaurant?.name || 'Store',
+      restaurantAddress: activeRestaurant?.address,
+      timezone: activeRestaurant?.timezone,
+      currencySymbol,
+      filterLabel: filterParts.length > 0 ? filterParts.join(' | ') : 'All Active Inventory Items',
+      items: filteredItems.map((i) => ({
+        item: i,
+        categoryName: i.category,
+        departmentName: i.departmentName || 'General Store',
+        stockValue: i.stockValue,
+        daysOfStock: i.stockDaysValue,
+        stockDaysLabel: i.stockDaysLabel,
+        isExcess: i.isExcess,
+      })),
+    });
+  };
+
+  const handleExportAdjustmentHistoryPdf = () => {
+    exportStockAdjustmentHistoryPdf({
+      restaurantName: activeRestaurant?.name || 'Store',
+      restaurantAddress: activeRestaurant?.address,
+      timezone: activeRestaurant?.timezone,
+      adjustments: filteredStockAdjustments,
+    });
   };
 
   const openMenuItem = openMenu ? filteredItems.find((i) => i.id === openMenu.itemId) || null : null;
@@ -1091,23 +1141,32 @@ export const StockView: React.FC = () => {
                         {item.stockDaysLabel}
                       </td>
                       <td className="py-3 px-4">
-                        {isArchived ? (
-                          <Badge variant="neutral" size="sm">
-                            Archived
-                          </Badge>
-                        ) : item.statusType === 'LOW' ? (
-                          <Badge variant="danger" size="sm">
-                            Low Stock
-                          </Badge>
-                        ) : item.statusType === 'EXCESS' ? (
-                          <Badge variant="warning" size="sm">
-                            Excess Stock
-                          </Badge>
-                        ) : (
-                          <Badge variant="success" size="sm">
-                            Sufficient
-                          </Badge>
-                        )}
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {item.stockStatus.code === 'INACTIVE' ? (
+                            <Badge variant="neutral" size="sm">
+                              Inactive
+                            </Badge>
+                          ) : item.stockStatus.code === 'OUT_OF_STOCK' ? (
+                            <Badge variant="danger" size="sm">
+                              Out of Stock
+                            </Badge>
+                          ) : item.stockStatus.code === 'LOW_STOCK' ? (
+                            <Badge variant="warning" size="sm">
+                              Low Stock
+                            </Badge>
+                          ) : (
+                            <>
+                              <Badge variant="success" size="sm">
+                                In Stock
+                              </Badge>
+                              {item.isExcess && (
+                                <Badge variant="info" size="sm">
+                                  Excess
+                                </Badge>
+                              )}
+                            </>
+                          )}
+                        </div>
                       </td>
                       <td className="py-3 px-4 text-center">
                         <div className="inline-flex items-center justify-center gap-1">
@@ -1272,21 +1331,21 @@ export const StockView: React.FC = () => {
                         <span>Edit Stock</span>
                       </button>
                     )}
-                    {isArchived ? (
+                    {item.stockStatus.code === 'INACTIVE' ? (
                       <Badge variant="neutral" size="sm">
-                        Archived
+                        Inactive
                       </Badge>
-                    ) : item.statusType === 'LOW' ? (
+                    ) : item.stockStatus.code === 'OUT_OF_STOCK' ? (
                       <Badge variant="danger" size="sm">
-                        Low Stock
+                        Out of Stock
                       </Badge>
-                    ) : item.statusType === 'EXCESS' ? (
+                    ) : item.stockStatus.code === 'LOW_STOCK' ? (
                       <Badge variant="warning" size="sm">
-                        Excess Stock
+                        Low Stock
                       </Badge>
                     ) : (
                       <Badge variant="success" size="sm">
-                        Sufficient
+                        In Stock
                       </Badge>
                     )}
                   </div>
@@ -1321,16 +1380,28 @@ export const StockView: React.FC = () => {
               </div>
             </div>
 
-            <div className="relative w-full sm:w-64">
-              <Search className="w-3.5 h-3.5 text-stone-400 absolute left-3 top-2.5" />
-              <input
-                id="stock-adjustment-history-search"
-                type="text"
-                placeholder="Search item, reason, or user..."
-                value={adjustmentHistorySearch}
-                onChange={(e) => setAdjustmentHistorySearch(e.target.value)}
-                className="w-full pl-8 pr-3 py-1.5 text-xs border border-stone-300 rounded-lg bg-white focus:outline-none focus:border-[#0D2149]"
-              />
+            <div className="flex items-center gap-2 w-full sm:w-auto">
+              <div className="relative flex-1 sm:w-64">
+                <Search className="w-3.5 h-3.5 text-stone-400 absolute left-3 top-2.5" />
+                <input
+                  id="stock-adjustment-history-search"
+                  type="text"
+                  placeholder="Search item, reason, or user..."
+                  value={adjustmentHistorySearch}
+                  onChange={(e) => setAdjustmentHistorySearch(e.target.value)}
+                  className="w-full pl-8 pr-3 py-1.5 text-xs border border-stone-300 rounded-lg bg-white focus:outline-none focus:border-[#0D2149]"
+                />
+              </div>
+              <button
+                id="export-stock-adjustment-history-pdf-btn"
+                type="button"
+                onClick={handleExportAdjustmentHistoryPdf}
+                disabled={filteredStockAdjustments.length === 0}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0D2149] hover:bg-[#17356e] disabled:opacity-40 text-white text-xs font-semibold transition-colors whitespace-nowrap"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>PDF</span>
+              </button>
             </div>
           </div>
 

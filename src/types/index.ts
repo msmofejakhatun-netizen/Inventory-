@@ -220,6 +220,8 @@ export interface StockTransaction {
 
 export interface Issue {
   id: string;
+  sessionId?: string;
+  issueNumber?: string;
   departmentId: string;
   departmentName: string;
   itemId: string;
@@ -235,6 +237,50 @@ export interface Issue {
   shift: 'MORNING' | 'EVENING' | 'NIGHT' | 'GENERAL';
   restaurantId: string;
   createdAt: string;
+}
+
+export interface IssueSignature {
+  status: 'PENDING' | 'SIGNED';
+  signerUid?: string;
+  signerName?: string;
+  signerRole?: UserRole;
+  signedAt?: string;
+  signatureDataUrl?: string;
+}
+
+export interface IssueSessionItem {
+  itemId: string;
+  itemName: string;
+  quantity: number;
+  unit: string;
+  rate: number;
+  value: number;
+  issueRecordId?: string;
+}
+
+export interface IssueSession {
+  id: string;
+  issueNumber: string;
+  issueDate: string; // YYYY-MM-DD in restaurant local timezone
+  issueTime: string; // HH:mm in restaurant local timezone
+  timezone: string;
+  restaurantId: string;
+  departmentId: string;
+  departmentName: string;
+  shift: Issue['shift'];
+  issuedByUid: string;
+  issuedByName: string;
+  issuedByRole?: UserRole;
+  receivedByUid?: string | null;
+  receivedByName: string;
+  items: IssueSessionItem[];
+  totalItems: number;
+  totalValue: number;
+  managerSignature: IssueSignature;
+  receiverSignature: IssueSignature;
+  isLegacy?: boolean;
+  createdAt: string;
+  updatedAt?: string;
 }
 
 export type EmergencyReason =

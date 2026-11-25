@@ -377,22 +377,46 @@ export const PurchasesView: React.FC = () => {
   };
 
   const handleExportPdf = () => {
+    const fmt = (n: number) =>
+      `${currencySymbol}${(Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     const headers = ['Bill #', 'PO #', 'Date', 'Vendor', 'Items', 'Net Amount', 'Paid', 'Due', 'Status'];
+    let totalNet = 0;
+    let totalPaid = 0;
+    let totalDue = 0;
+
     const rows = filteredPurchases.map((p) => {
       const payInfo = getPurchasePaymentInfo(p);
+      totalNet += Number(p.netAmount) || 0;
+      totalPaid += Number(payInfo.paidAmount) || 0;
+      totalDue += Number(payInfo.remainingAmount) || 0;
       return [
         p.billNumber,
         p.poNumber || '—',
         p.billDate,
         p.vendorName,
         p.itemsCount,
-        `${currencySymbol}${p.netAmount.toFixed(2)}`,
-        `${currencySymbol}${payInfo.paidAmount.toFixed(2)}`,
-        `${currencySymbol}${payInfo.remainingAmount.toFixed(2)}`,
+        fmt(p.netAmount),
+        fmt(payInfo.paidAmount),
+        fmt(payInfo.remainingAmount),
         payInfo.displayStatus,
       ];
     });
-    exportToPdf('Inward Purchases & Payment Ledger', activeRestaurant?.name || 'Store', headers, rows);
+
+    exportToPdf('Inward Purchases & Payment Ledger', activeRestaurant?.name || 'Store', headers, rows, {
+      orientation: 'landscape',
+      restaurantAddress: activeRestaurant?.address,
+      timezone: activeRestaurant?.timezone,
+      summaryCards: [
+        { label: 'Total Invoices', value: String(filteredPurchases.length), accent: 'navy' },
+        { label: 'Total Inward Value', value: fmt(totalNet), accent: 'navy' },
+        { label: 'Total Paid', value: fmt(totalPaid), accent: 'green' },
+        { label: 'Outstanding Due', value: fmt(totalDue), accent: totalDue > 0 ? 'red' : 'green' },
+      ],
+      totalsRow:
+        rows.length > 0
+          ? ['', '', '', `TOTAL (${rows.length} Bills)`, '', fmt(totalNet), fmt(totalPaid), fmt(totalDue), '']
+          : undefined,
+    });
   };
 
   return (

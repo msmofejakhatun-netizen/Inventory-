@@ -332,27 +332,52 @@ export const VendorsView: React.FC = () => {
   };
 
   const handleExportPdf = () => {
+    const fmt = (n: number) =>
+      `${currencySymbol}${(Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
     if (activeTab === 'VENDORS') {
-      const headers = ['Vendor Name', 'Contact', 'Phone', 'GST #', 'Current Due'];
+      const totalDue = filteredVendors.reduce((sum, v) => sum + (Number(v.currentDue) || 0), 0);
+      const vendorsWithDue = filteredVendors.filter((v) => (Number(v.currentDue) || 0) > 0).length;
+      const headers = ['Vendor Name', 'Contact Person', 'Phone', 'GST #', 'Current Due'];
       const rows = filteredVendors.map((v) => [
         v.name,
-        v.contactPerson,
-        v.phone,
-        v.gstNumber,
-        `${currencySymbol}${v.currentDue.toFixed(2)}`,
+        v.contactPerson || '—',
+        v.phone || '—',
+        v.gstNumber || '—',
+        fmt(v.currentDue),
       ]);
-      exportToPdf('Vendor Outstanding Dues Ledger', activeRestaurant?.name || 'Store', headers, rows);
+      exportToPdf('Vendor Outstanding Dues Ledger', activeRestaurant?.name || 'Store', headers, rows, {
+        orientation: 'portrait',
+        restaurantAddress: activeRestaurant?.address,
+        timezone: activeRestaurant?.timezone,
+        summaryCards: [
+          { label: 'Total Vendors', value: String(filteredVendors.length), accent: 'navy' },
+          { label: 'Vendors With Due', value: String(vendorsWithDue), accent: vendorsWithDue > 0 ? 'orange' : 'green' },
+          { label: 'Total Payable Due', value: fmt(totalDue), accent: totalDue > 0 ? 'red' : 'green' },
+        ],
+        totalsRow: rows.length > 0 ? [`TOTAL (${rows.length} Vendors)`, '', '', '', fmt(totalDue)] : undefined,
+      });
     } else {
+      const totalPaid = filteredPayments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
       const headers = ['Date', 'Vendor', 'Bill #', 'Mode', 'Ref #', 'Amount'];
       const rows = filteredPayments.map((p) => [
         p.paymentDate || p.createdAt.slice(0, 10),
         p.vendorName,
         p.billNumber || 'General',
         p.paymentMode,
-        p.reference || '-',
-        `${currencySymbol}${p.amount.toFixed(2)}`,
+        p.reference || '—',
+        fmt(p.amount),
       ]);
-      exportToPdf('Vendor Payment Vouchers Ledger', activeRestaurant?.name || 'Store', headers, rows);
+      exportToPdf('Vendor Payment Vouchers Ledger', activeRestaurant?.name || 'Store', headers, rows, {
+        orientation: 'portrait',
+        restaurantAddress: activeRestaurant?.address,
+        timezone: activeRestaurant?.timezone,
+        summaryCards: [
+          { label: 'Total Vouchers', value: String(filteredPayments.length), accent: 'navy' },
+          { label: 'Total Amount Paid', value: fmt(totalPaid), accent: 'green' },
+        ],
+        totalsRow: rows.length > 0 ? ['', `TOTAL (${rows.length} Payments)`, '', '', '', fmt(totalPaid)] : undefined,
+      });
     }
   };
 

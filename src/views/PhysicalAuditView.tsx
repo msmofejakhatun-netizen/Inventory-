@@ -110,6 +110,74 @@ export const PhysicalAuditView: React.FC = () => {
     exportToCsv(`stock_audits_${activeRestaurant?.name || 'store'}`, headers, rows);
   };
 
+  const handleExportPdf = () => {
+    const sym = activeRestaurant?.currencySymbol || '₹';
+    const totalVarianceValue = adjustments.reduce((sum, a) => sum + (Number(a.varianceValue) || 0), 0);
+    const shortageCount = adjustments.filter((a) => (Number(a.varianceQuantity) || 0) < 0).length;
+    const surplusCount = adjustments.filter((a) => (Number(a.varianceQuantity) || 0) > 0).length;
+
+    const headers = [
+      'Date & Time',
+      'Item Name',
+      'System Stock',
+      'Physical Count',
+      'Variance Qty',
+      'Variance Value',
+      'Reason',
+      'Auditor',
+    ];
+    const rows = adjustments.map((a) => {
+      const diff = Number(a.varianceQuantity) || 0;
+      const val = Number(a.varianceValue) || 0;
+      const unit = a.unit || '';
+      return [
+        new Date(a.createdAt).toLocaleString('en-IN'),
+        a.itemName,
+        `${a.systemStock} ${unit}`.trim(),
+        `${a.physicalStock} ${unit}`.trim(),
+        `${diff > 0 ? '+' : ''}${diff} ${unit}`.trim(),
+        `${val < 0 ? '-' : ''}${sym}${Math.abs(val).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+        a.reason || 'Physical Count',
+        a.countedByName || 'Auditor',
+      ];
+    });
+
+    exportToPdf(
+      'Physical Stock Audit & Variance Report',
+      activeRestaurant?.name || 'Store',
+      headers,
+      rows,
+      {
+        orientation: 'landscape',
+        restaurantAddress: activeRestaurant?.address,
+        timezone: activeRestaurant?.timezone,
+        summaryCards: [
+          { label: 'Total Counts', value: String(adjustments.length), accent: 'navy' },
+          { label: 'Shortages', value: String(shortageCount), accent: 'red' },
+          { label: 'Surpluses', value: String(surplusCount), accent: 'green' },
+          {
+            label: 'Net Variance Value',
+            value: `${totalVarianceValue < 0 ? '-' : ''}${sym}${Math.abs(totalVarianceValue).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+            accent: totalVarianceValue < 0 ? 'red' : 'navy',
+          },
+        ],
+        totalsRow:
+          rows.length > 0
+            ? [
+                '',
+                `TOTAL (${rows.length} Audits)`,
+                '',
+                '',
+                'Net Variance:',
+                `${totalVarianceValue < 0 ? '-' : ''}${sym}${Math.abs(totalVarianceValue).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+                '',
+                '',
+              ]
+            : undefined,
+      }
+    );
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -132,6 +200,13 @@ export const PhysicalAuditView: React.FC = () => {
             className="flex items-center gap-1 px-3 py-2 border border-stone-200 hover:bg-stone-50 text-stone-700 rounded-lg text-xs font-semibold"
           >
             <Download className="w-3.5 h-3.5" /> CSV Export
+          </button>
+          <button
+            id="physical-audit-pdf-btn"
+            onClick={handleExportPdf}
+            className="flex items-center gap-1 px-3 py-2 bg-[#0D2149] hover:bg-[#17356e] text-white rounded-lg text-xs font-semibold transition-colors"
+          >
+            <Download className="w-3.5 h-3.5" /> PDF Report
           </button>
         </div>
       </div>

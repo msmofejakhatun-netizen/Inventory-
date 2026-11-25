@@ -535,6 +535,485 @@ export async function executeDepartmentIssueTransaction(
   }
 }
 
+export interface MultiItemIssueSessionLineInput {
+  itemId: string;
+  itemName: string;
+  unit: string;
+  quantity: number;
+}
+
+export interface MultiItemIssueSessionInput {
+  departmentId: string;
+  departmentName: string;
+  shift: Issue['shift'];
+  issuedByUid: string;
+  issuedByName: string;
+  issuedByRole?: UserRole;
+  receivedByUid?: string | null;
+  receivedByName: string;
+  timezone?: string;
+  items: MultiItemIssueSessionLineInput[];
+  managerSignatureDataUrl?: string | null;
+}
+
+export interface MultiItemIssueSessionResult {
+  sessionId: string;
+  issueNumber: string;
+  totalItems: number;
+  totalValue: number;
+}
+
+/**
+ * Executes an atomic multi-item Store to Kitchen Issue Session:
+ * - Reads issue counter + all item documents inside ONE Firestore transaction before any write
+ * - Validates every item exists, is active, has no duplicates, and has sufficient stock
+ * - Deducts each item's currentStock exactly once (without altering WAC, lastPurchaseRate, currentItemRate, or UOM)
+ * - Generates a sequential unique Issue ID (ISS-001, ISS-002, ...)
+ * - Saves ONE IssueSession document, linked Issue line records (for backward-compatible analytics),
+ *   immutable StockTransaction records, and an AuditLog entry
+ * - If ANY validation or write fails, zero stock is deducted and no session is created
+ */
+export async function executeMultiItemIssueSessionTransaction(
+  restaurantId: string,
+  input: MultiItemIssueSessionInput
+): Promise<MultiItemIssueSessionResult> {
+  if (!restaurantId || !restaurantId.trim()) {
+    throw new Error('Active restaurant context is required.');
+  }
+  if (!input.issuedByUid || !input.issuedByUid.trim()) {
+    throw new Error('Authenticated user identity is required to issue stock.');
+  }
+  if (!input.departmentId || !input.departmentName?.trim()) {
+    throw new Error('Please select a kitchen department.');
+  }
+  const receivedByName = String(input.receivedByName ?? '').trim();
+  if (!receivedByName || receivedByName.length > 100) {
+    throw new Error('Please enter the Chef / Staff name receiving the stock.');
+  }
+  if (!Array.isArray(input.items) || input.items.length === 0) {
+    throw new Error('Please add at least one item to this issue session.');
+  }
+  if (input.items.length > 50) {
+    throw new Error('An issue session can include up to 50 items at a time.');
+  }
+
+  // Prevent duplicate item rows within one issue session
+  const seenItemIds = new Set<string>();
+  for (const line of input.items) {
+    if (!line.itemId) {
+      throw new Error('Invalid item selected in issue session.');
+    }
+    if (seenItemIds.has(line.itemId)) {
+      throw new Error(`Duplicate item "${line.itemName}" found in issue session. Edit the existing row instead.`);
+    }
+    seenItemIds.add(line.itemId);
+
+    const qty = Number(line.quantity);
+    if (!Number.isFinite(qty) || qty <= 0) {
+      throw new Error(`Quantity for "${line.itemName}" must be greater than 0.`);
+    }
+  }
+
+  // Validate optional pre-confirmation Manager Signature (only OWNER or MANAGER may sign as Manager)
+  let initialManagerSignature: import('../types').IssueSignature = { status: 'PENDING' };
+  const rawMgrSig = (input.managerSignatureDataUrl || '').trim();
+  if (rawMgrSig) {
+    if (input.issuedByRole !== 'OWNER' && input.issuedByRole !== 'MANAGER') {
+      throw new Error('Only an authorized Owner or Manager can attach a Manager Signature.');
+    }
+    if (!rawMgrSig.startsWith('data:image/png;base64,') || rawMgrSig.length > 130_000) {
+      throw new Error('Invalid signature image format or size.');
+    }
+    initialManagerSignature = {
+      status: 'SIGNED',
+      signerUid: input.issuedByUid,
+      signerName: input.issuedByName,
+      signerRole: input.issuedByRole,
+      signedAt: new Date().toISOString(),
+      signatureDataUrl: rawMgrSig,
+    };
+  }
+
+  const sessionRef = doc(getTenantCol(restaurantId, 'issueSessions'));
+  const sessionId = sessionRef.id;
+  const counterRef = getTenantDoc(restaurantId, 'issueCounters', 'default');
+  const nowDate = new Date();
+  const now = nowDate.toISOString();
+
+  // Compute restaurant-local issue date and time
+  const resolveTz = (tz?: string) => {
+    const candidate = (tz || '').trim() || 'Asia/Kolkata';
+    try {
+      new Intl.DateTimeFormat('en-CA', { timeZone: candidate }).format(nowDate);
+      return candidate;
+    } catch {
+      return 'Asia/Kolkata';
+    }
+  };
+  const timezone = resolveTz(input.timezone);
+  const dateParts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(nowDate);
+  const issueDate = `${dateParts.find((p) => p.type === 'year')?.value}-${dateParts.find((p) => p.type === 'month')?.value}-${dateParts.find((p) => p.type === 'day')?.value}`;
+  const timeParts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: timezone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(nowDate);
+  const issueTime = `${timeParts.find((p) => p.type === 'hour')?.value}:${timeParts.find((p) => p.type === 'minute')?.value}`;
+
+  class IssueSessionValidationError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = 'IssueSessionValidationError';
+    }
+  }
+
+  let finalIssueNumber = '';
+  let finalTotalValue = 0;
+
+  try {
+    await runTransaction(db, async (transaction) => {
+      // Phase 1: All Firestore reads BEFORE any write
+      const counterSnap = await transaction.get(counterRef);
+      const itemRefs = input.items.map((line) => getTenantDoc(restaurantId, 'items', line.itemId));
+      const itemSnaps = await Promise.all(itemRefs.map((ref) => transaction.get(ref)));
+
+      // Phase 2: Validate every item against live inventory
+      const nextSequence = counterSnap.exists()
+        ? Math.max(1, Math.floor(Number(counterSnap.data()?.lastNumber || 0)) + 1)
+        : 1;
+      const issueNumber = `ISS-${String(nextSequence).padStart(3, '0')}`;
+      finalIssueNumber = issueNumber;
+
+      const preparedLines: Array<{
+        itemRef: ReturnType<typeof getTenantDoc>;
+        liveItem: Item;
+        qty: number;
+        rate: number;
+        value: number;
+        previousStock: number;
+        newStock: number;
+        issueRef: ReturnType<typeof doc>;
+      }> = [];
+
+      let sessionTotalValue = 0;
+
+      for (let idx = 0; idx < input.items.length; idx++) {
+        const line = input.items[idx];
+        const snap = itemSnaps[idx];
+        if (!snap.exists()) {
+          throw new IssueSessionValidationError(`Item "${line.itemName}" was not found in inventory.`);
+        }
+        const liveItem = snap.data() as Item;
+        if (liveItem.restaurantId && liveItem.restaurantId !== restaurantId) {
+          throw new IssueSessionValidationError('Cross-restaurant inventory access is not allowed.');
+        }
+        if (liveItem.status === 'inactive') {
+          throw new IssueSessionValidationError(`Archived item "${liveItem.name}" cannot be issued.`);
+        }
+
+        const previousStock = Number(Number(liveItem.currentStock || 0).toFixed(2));
+        const qty = Number(Number(line.quantity).toFixed(2));
+
+        if (qty > previousStock) {
+          throw new IssueSessionValidationError(
+            `Insufficient stock for ${liveItem.name}. Available: ${previousStock} ${liveItem.unit}, Requested: ${qty} ${liveItem.unit}.`
+          );
+        }
+
+        // Preserve existing WAC costing without modifying averageStockRate or lastPurchaseRate
+        const rate = Number(liveItem.averageStockRate || liveItem.lastPurchaseRate || 0);
+        const value = Number((qty * rate).toFixed(2));
+        const newStock = Number((previousStock - qty).toFixed(2));
+        sessionTotalValue = Number((sessionTotalValue + value).toFixed(2));
+
+        preparedLines.push({
+          itemRef: itemRefs[idx],
+          liveItem,
+          qty,
+          rate,
+          value,
+          previousStock,
+          newStock,
+          issueRef: doc(getTenantCol(restaurantId, 'issues')),
+        });
+      }
+
+      finalTotalValue = sessionTotalValue;
+
+      // Phase 3: Atomic writes (if any fail, Firestore rolls back everything)
+      transaction.set(
+        counterRef,
+        {
+          lastNumber: nextSequence,
+          restaurantId,
+          updatedAt: now,
+        },
+        { merge: true }
+      );
+
+      const sessionItems: import('../types').IssueSessionItem[] = [];
+
+      for (const entry of preparedLines) {
+        // Deduct stock ONLY (never touch WAC, lastPurchaseRate, currentItemRate, or UOM)
+        transaction.update(entry.itemRef, {
+          currentStock: entry.newStock,
+          updatedAt: now,
+        });
+
+        // Write linked item-level Issue record so existing dashboard/consumption/reports remain 100% intact
+        const issueDoc: Issue = {
+          id: entry.issueRef.id,
+          sessionId,
+          issueNumber,
+          departmentId: input.departmentId,
+          departmentName: input.departmentName,
+          itemId: entry.liveItem.id,
+          itemName: entry.liveItem.name,
+          unit: entry.liveItem.unit,
+          quantity: entry.qty,
+          rate: entry.rate,
+          value: entry.value,
+          staffUid: input.receivedByUid || input.issuedByUid,
+          staffName: receivedByName,
+          issuedByUid: input.issuedByUid,
+          issuedByName: input.issuedByName,
+          shift: input.shift,
+          restaurantId,
+          createdAt: now,
+        };
+        transaction.set(entry.issueRef, issueDoc);
+
+        // Write immutable StockTransaction ledger entry
+        const txnRef = doc(getTenantCol(restaurantId, 'stockTransactions'));
+        const txn: StockTransaction = {
+          id: txnRef.id,
+          itemId: entry.liveItem.id,
+          itemName: entry.liveItem.name,
+          unit: entry.liveItem.unit,
+          type: 'DEPT_ISSUE',
+          quantity: -entry.qty,
+          previousStock: entry.previousStock,
+          newStock: entry.newStock,
+          rate: entry.rate,
+          value: entry.value,
+          departmentId: input.departmentId,
+          departmentName: input.departmentName,
+          staffUid: input.receivedByUid || input.issuedByUid,
+          staffName: receivedByName,
+          actorUid: input.issuedByUid,
+          actorName: input.issuedByName,
+          referenceId: sessionId,
+          reason: `Issue ${issueNumber} to ${input.departmentName} (${input.shift} shift) — Received by ${receivedByName}`,
+          restaurantId,
+          createdAt: now,
+        };
+        transaction.set(txnRef, txn);
+
+        sessionItems.push({
+          itemId: entry.liveItem.id,
+          itemName: entry.liveItem.name,
+          quantity: entry.qty,
+          unit: entry.liveItem.unit,
+          rate: entry.rate,
+          value: entry.value,
+          issueRecordId: entry.issueRef.id,
+        });
+      }
+
+      const sessionDoc: import('../types').IssueSession = {
+        id: sessionId,
+        issueNumber,
+        issueDate,
+        issueTime,
+        timezone,
+        restaurantId,
+        departmentId: input.departmentId,
+        departmentName: input.departmentName,
+        shift: input.shift,
+        issuedByUid: input.issuedByUid,
+        issuedByName: input.issuedByName,
+        ...(input.issuedByRole ? { issuedByRole: input.issuedByRole } : {}),
+        receivedByUid: input.receivedByUid || null,
+        receivedByName,
+        items: sessionItems,
+        totalItems: sessionItems.length,
+        totalValue: sessionTotalValue,
+        managerSignature: initialManagerSignature,
+        receiverSignature: { status: 'PENDING' },
+        createdAt: now,
+        updatedAt: now,
+      };
+      transaction.set(sessionRef, sessionDoc);
+
+      const auditRef = doc(getTenantCol(restaurantId, 'auditLogs'));
+      const audit: AuditLog = {
+        id: auditRef.id,
+        actorUid: input.issuedByUid,
+        actorName: input.issuedByName,
+        ...(input.issuedByRole ? { actorRole: input.issuedByRole } : {}),
+        action: 'STOCK_ISSUE_SESSION_CREATED',
+        entity: 'IssueSession',
+        entityId: sessionId,
+        details: `Created Issue ${issueNumber} (${sessionItems.length} items, value ${sessionTotalValue.toFixed(2)}) for ${input.departmentName} (${input.shift} shift), received by ${receivedByName}`,
+        restaurantId,
+        createdAt: now,
+      };
+      transaction.set(auditRef, audit);
+    });
+
+    return {
+      sessionId,
+      issueNumber: finalIssueNumber,
+      totalItems: input.items.length,
+      totalValue: finalTotalValue,
+    };
+  } catch (err) {
+    if (err instanceof IssueSessionValidationError) {
+      throw err;
+    }
+    handleFirestoreError(err, OperationType.WRITE, `restaurants/${restaurantId}/issueSessions`);
+  }
+}
+
+/**
+ * Stores a digital Manager Signature or Chef/Staff Receiving Signature on an existing IssueSession.
+ * Strictly enforces separate approvals, role authorization, and immutability once signed.
+ */
+export async function saveIssueSessionSignature(
+  restaurantId: string,
+  sessionId: string,
+  signatureType: 'manager' | 'receiver',
+  payload: {
+    signerUid: string;
+    signerName: string;
+    signerRole: UserRole;
+    signatureDataUrl: string;
+  }
+): Promise<void> {
+  if (!restaurantId || !sessionId) {
+    throw new Error('Restaurant and issue session IDs are required.');
+  }
+  if (!payload.signerUid || !payload.signerName?.trim()) {
+    throw new Error('Authenticated signer identity is required.');
+  }
+  const dataUrl = String(payload.signatureDataUrl ?? '').trim();
+  if (!dataUrl.startsWith('data:image/png;base64,') || dataUrl.length > 130_000) {
+    throw new Error('Please draw a valid signature before saving.');
+  }
+
+  class SignatureValidationError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = 'SignatureValidationError';
+    }
+  }
+
+  const sessionRef = getTenantDoc(restaurantId, 'issueSessions', sessionId);
+  const now = new Date().toISOString();
+
+  try {
+    await runTransaction(db, async (transaction) => {
+      const snap = await transaction.get(sessionRef);
+      if (!snap.exists()) {
+        throw new SignatureValidationError('Issue session not found.');
+      }
+
+      const session = snap.data() as import('../types').IssueSession;
+      if (session.restaurantId !== restaurantId) {
+        throw new SignatureValidationError('You do not have permission to sign another restaurant’s issue record.');
+      }
+
+      if (signatureType === 'manager') {
+        if (payload.signerRole !== 'OWNER' && payload.signerRole !== 'MANAGER') {
+          throw new SignatureValidationError('Only an authorized Owner or Manager can sign as Manager.');
+        }
+        if (session.managerSignature?.status === 'SIGNED') {
+          throw new SignatureValidationError('Manager signature has already been recorded for this session.');
+        }
+        if (session.receiverSignature?.signerUid === payload.signerUid) {
+          throw new SignatureValidationError(
+            'Manager approval and Chef/Staff receiving signature must be captured by separate signers.'
+          );
+        }
+
+        const sig: import('../types').IssueSignature = {
+          status: 'SIGNED',
+          signerUid: payload.signerUid,
+          signerName: payload.signerName.trim(),
+          signerRole: payload.signerRole,
+          signedAt: now,
+          signatureDataUrl: dataUrl,
+        };
+
+        transaction.update(sessionRef, {
+          managerSignature: sig,
+          updatedAt: now,
+        });
+      } else {
+        if (session.receiverSignature?.status === 'SIGNED') {
+          throw new SignatureValidationError('Chef/Staff receiving signature has already been recorded for this session.');
+        }
+        if (session.managerSignature?.signerUid === payload.signerUid) {
+          throw new SignatureValidationError(
+            'Manager approval and Chef/Staff receiving signature must be captured by separate signers.'
+          );
+        }
+
+        const assignedUid = (session.receivedByUid || '').trim();
+        const isAllowedReceiver = assignedUid
+          ? assignedUid === payload.signerUid
+          : payload.signerRole === 'DEPARTMENT_STAFF';
+
+        if (!isAllowedReceiver) {
+          throw new SignatureValidationError(
+            'You are not authorized to sign as the receiving Chef/Staff for this issue session.'
+          );
+        }
+
+        const sig: import('../types').IssueSignature = {
+          status: 'SIGNED',
+          signerUid: payload.signerUid,
+          signerName: payload.signerName.trim(),
+          signerRole: payload.signerRole,
+          signedAt: now,
+          signatureDataUrl: dataUrl,
+        };
+
+        transaction.update(sessionRef, {
+          receiverSignature: sig,
+          updatedAt: now,
+        });
+      }
+
+      const auditRef = doc(getTenantCol(restaurantId, 'auditLogs'));
+      const audit: AuditLog = {
+        id: auditRef.id,
+        actorUid: payload.signerUid,
+        actorName: payload.signerName.trim(),
+        actorRole: payload.signerRole,
+        action: signatureType === 'manager' ? 'ISSUE_MANAGER_SIGNED' : 'ISSUE_RECEIVER_SIGNED',
+        entity: 'IssueSession',
+        entityId: sessionId,
+        details: `${signatureType === 'manager' ? 'Manager approval' : 'Chef/Staff receiving'} signature recorded for Issue ${session.issueNumber} by ${payload.signerName.trim()}`,
+        restaurantId,
+        createdAt: now,
+      };
+      transaction.set(auditRef, audit);
+    });
+  } catch (err) {
+    if (err instanceof SignatureValidationError) {
+      throw err;
+    }
+    handleFirestoreError(err, OperationType.WRITE, `restaurants/${restaurantId}/issueSessions/${sessionId}`);
+  }
+}
+
 /**
  * Executes Emergency Issue Requisition:
  * - Decrements stock atomically

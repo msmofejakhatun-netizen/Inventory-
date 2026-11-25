@@ -942,7 +942,8 @@ Please confirm receipt and delivery schedule.`;
                           po,
                           activeRestaurant?.name || 'Restaurant',
                           currencySymbol,
-                          activeRestaurant?.address
+                          activeRestaurant?.address,
+                          activeRestaurant?.timezone
                         )
                       }
                       className="flex items-center gap-1 px-2.5 py-1.5 text-xs border border-stone-200 hover:bg-stone-50 rounded-lg text-stone-700 font-medium transition-colors shrink-0"
