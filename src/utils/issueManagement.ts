@@ -27,6 +27,22 @@ export interface DepartmentIssueSummaryRow {
   totalValue: number;
 }
 
+export interface ShiftIssueSummaryRow {
+  shift: Issue['shift'];
+  shiftLabel: string;
+  sessionCount: number;
+  itemCount: number;
+  totalValue: number;
+}
+
+export interface IssueDateValidationResult {
+  valid: boolean;
+  error: string | null;
+  normalizedDateKey: string;
+  todayDateKey: string;
+  isBackdated: boolean;
+}
+
 export const MAX_ITEMS_PER_ISSUE_SESSION = 50;
 export const MAX_SIGNATURE_DATA_URL_LENGTH = 130_000;
 
@@ -158,6 +174,100 @@ export function shiftDateKey(dateKey: string, deltaDays: number): string {
   const m = String(utc.getUTCMonth() + 1).padStart(2, '0');
   const d = String(utc.getUTCDate()).padStart(2, '0');
   return `${y}-${m}-${d}`;
+}
+
+/**
+ * Validates a `YYYY-MM-DD` calendar date string strictly against real calendar dates
+ * (rejects non-existent dates like 2026-02-30 or 2026-13-01).
+ */
+export function isValidCalendarDateKey(dateKey: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec((dateKey || '').trim());
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (year < 2000 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) {
+    return false;
+  }
+  const utc = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+  return (
+    utc.getUTCFullYear() === year &&
+    utc.getUTCMonth() + 1 === month &&
+    utc.getUTCDate() === day
+  );
+}
+
+/**
+ * Validates a manually selected Store to Kitchen Issue Date against the restaurant's local timezone.
+ * - Rejects blank, malformed, or invalid calendar dates
+ * - Rejects future dates (> restaurant local today)
+ * - Flags past dates (< restaurant local today) as backdated entries
+ */
+export function validateSelectedIssueDate(
+  selectedDateKey: string | null | undefined,
+  timeZone?: string | null,
+  referenceDate: Date = new Date()
+): IssueDateValidationResult {
+  const tz = resolveSafeTimeZone(timeZone);
+  const todayDateKey = getLocalDateKey(referenceDate, tz);
+  const cleaned = (selectedDateKey || '').trim();
+
+  if (!cleaned) {
+    return {
+      valid: false,
+      error: 'Issue Date is required. Please select a valid date.',
+      normalizedDateKey: todayDateKey,
+      todayDateKey,
+      isBackdated: false,
+    };
+  }
+
+  if (!isValidCalendarDateKey(cleaned)) {
+    return {
+      valid: false,
+      error: 'Please enter a valid Issue Date (YYYY-MM-DD).',
+      normalizedDateKey: todayDateKey,
+      todayDateKey,
+      isBackdated: false,
+    };
+  }
+
+  if (cleaned > todayDateKey) {
+    return {
+      valid: false,
+      error: `Future Issue Dates are not allowed. Please select ${formatDateKeyReadable(todayDateKey)} or an earlier date.`,
+      normalizedDateKey: cleaned,
+      todayDateKey,
+      isBackdated: false,
+    };
+  }
+
+  return {
+    valid: true,
+    error: null,
+    normalizedDateKey: cleaned,
+    todayDateKey,
+    isBackdated: cleaned < todayDateKey,
+  };
+}
+
+/**
+ * Determines whether an IssueSession was recorded as a backdated entry
+ * (selected Issue Date is strictly earlier than the local calendar date of entry creation).
+ */
+export function isIssueSessionBackdated(
+  session: Pick<IssueSession, 'issueDate' | 'createdAt' | 'timezone' | 'isBackdated'>,
+  timeZone?: string | null
+): boolean {
+  if (typeof session.isBackdated === 'boolean') {
+    return session.isBackdated;
+  }
+  if (!session.issueDate || !isValidCalendarDateKey(session.issueDate) || !session.createdAt) {
+    return false;
+  }
+  const tz = resolveSafeTimeZone(timeZone || session.timezone);
+  const createdLocalDateKey = getLocalDateKey(session.createdAt, tz);
+  return session.issueDate < createdLocalDateKey;
 }
 
 /**
@@ -348,42 +458,56 @@ export function combineIssueSessionsWithLegacyRecords(
 
   const adaptedLegacy: IssueSession[] = legacyIssues
     .filter((iss) => !iss.sessionId || !knownSessionIds.has(iss.sessionId))
-    .map((iss) => ({
-      id: `legacy_${iss.id}`,
-      issueNumber: iss.issueNumber || `LEGACY-${iss.id.slice(-5).toUpperCase()}`,
-      issueDate: getLocalDateKey(iss.createdAt, tz),
-      issueTime: getLocalTimeString(iss.createdAt, tz),
-      timezone: tz,
-      restaurantId: iss.restaurantId,
-      departmentId: iss.departmentId,
-      departmentName: iss.departmentName || 'Kitchen',
-      shift: iss.shift || 'GENERAL',
-      issuedByUid: iss.issuedByUid,
-      issuedByName: iss.issuedByName || 'Storekeeper',
-      receivedByUid: null,
-      receivedByName: iss.staffName || 'Staff',
-      items: [
-        {
-          itemId: iss.itemId,
-          itemName: iss.itemName,
-          quantity: Number(iss.quantity) || 0,
-          unit: iss.unit || 'Unit',
-          rate: Number(iss.rate) || 0,
-          value: Number(iss.value) || 0,
-          issueRecordId: iss.id,
-        },
-      ],
-      totalItems: 1,
-      totalValue: Number(iss.value) || 0,
-      managerSignature: { status: 'PENDING' },
-      receiverSignature: { status: 'PENDING' },
-      isLegacy: true,
-      createdAt: iss.createdAt,
-    }));
+    .map((iss) => {
+      const resolvedIssueDate =
+        iss.issueDate && isValidCalendarDateKey(iss.issueDate)
+          ? iss.issueDate
+          : getLocalDateKey(iss.createdAt, tz);
+      return {
+        id: `legacy_${iss.id}`,
+        issueNumber: iss.issueNumber || `LEGACY-${iss.id.slice(-5).toUpperCase()}`,
+        issueDate: resolvedIssueDate,
+        issueTime: getLocalTimeString(iss.createdAt, tz),
+        timezone: tz,
+        isBackdated:
+          typeof iss.isBackdated === 'boolean'
+            ? iss.isBackdated
+            : resolvedIssueDate < getLocalDateKey(iss.createdAt, tz),
+        restaurantId: iss.restaurantId,
+        departmentId: iss.departmentId,
+        departmentName: iss.departmentName || 'Kitchen',
+        shift: iss.shift || 'GENERAL',
+        issuedByUid: iss.issuedByUid,
+        issuedByName: iss.issuedByName || 'Storekeeper',
+        receivedByUid: null,
+        receivedByName: iss.staffName || 'Staff',
+        items: [
+          {
+            itemId: iss.itemId,
+            itemName: iss.itemName,
+            quantity: Number(iss.quantity) || 0,
+            unit: iss.unit || 'Unit',
+            rate: Number(iss.rate) || 0,
+            value: Number(iss.value) || 0,
+            issueRecordId: iss.id,
+          },
+        ],
+        totalItems: 1,
+        totalValue: Number(iss.value) || 0,
+        managerSignature: { status: 'PENDING' },
+        receiverSignature: { status: 'PENDING' },
+        isLegacy: true,
+        createdAt: iss.createdAt,
+      };
+    });
 
-  return [...sessions, ...adaptedLegacy].sort((a, b) =>
-    (b.createdAt || '').localeCompare(a.createdAt || '')
-  );
+  return [...sessions, ...adaptedLegacy].sort((a, b) => {
+    const dateA = a.issueDate || getLocalDateKey(a.createdAt, tz);
+    const dateB = b.issueDate || getLocalDateKey(b.createdAt, tz);
+    const dateCmp = dateB.localeCompare(dateA);
+    if (dateCmp !== 0) return dateCmp;
+    return (b.createdAt || '').localeCompare(a.createdAt || '');
+  });
 }
 
 /**
@@ -413,6 +537,38 @@ export function buildDepartmentIssueSummary(
     }
   }
   return Array.from(map.values()).sort((a, b) => b.totalValue - a.totalValue);
+}
+
+/**
+ * Aggregates shift-wise issue summary for a filtered list of sessions.
+ */
+export function buildShiftIssueSummary(sessions: IssueSession[]): ShiftIssueSummaryRow[] {
+  const shiftOrder: Issue['shift'][] = ['MORNING', 'EVENING', 'NIGHT', 'GENERAL'];
+  const map = new Map<Issue['shift'], ShiftIssueSummaryRow>();
+
+  for (const session of sessions) {
+    const key: Issue['shift'] = session.shift || 'GENERAL';
+    const existing = map.get(key);
+    const itemCount = session.items?.length || session.totalItems || 0;
+    const val = Number(session.totalValue) || 0;
+    if (existing) {
+      existing.sessionCount += 1;
+      existing.itemCount += itemCount;
+      existing.totalValue = Number((existing.totalValue + val).toFixed(2));
+    } else {
+      map.set(key, {
+        shift: key,
+        shiftLabel: formatShiftLabel(key),
+        sessionCount: 1,
+        itemCount,
+        totalValue: Number(val.toFixed(2)),
+      });
+    }
+  }
+
+  return Array.from(map.values()).sort(
+    (a, b) => shiftOrder.indexOf(a.shift) - shiftOrder.indexOf(b.shift)
+  );
 }
 
 /**

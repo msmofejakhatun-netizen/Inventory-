@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  Calendar,
   CheckCircle2,
   Loader2,
   PenTool,
@@ -21,10 +22,13 @@ import {
   MAX_ITEMS_PER_ISSUE_SESSION,
   buildDraftIssueCartItem,
   computeDraftSessionTotals,
+  formatDateKeyReadable,
   formatQty,
   getEffectiveItemWacRate,
+  getLocalDateKey,
   roundQty,
   validateIssueLineQuantity,
+  validateSelectedIssueDate,
 } from '../../utils/issueManagement';
 
 interface NewIssueSessionModalProps {
@@ -80,6 +84,7 @@ export const NewIssueSessionModal: React.FC<NewIssueSessionModalProps> = ({
 }) => {
   const [selectedDeptId, setSelectedDeptId] = useState('');
   const [shift, setShift] = useState<Issue['shift']>('MORNING');
+  const [issueDate, setIssueDate] = useState<string>(() => getLocalDateKey(new Date(), timezone));
   const [selectedReceiverUid, setSelectedReceiverUid] = useState<string>('');
   const [receivedByName, setReceivedByName] = useState('');
 
@@ -104,11 +109,12 @@ export const NewIssueSessionModal: React.FC<NewIssueSessionModalProps> = ({
   const [submitting, setSubmitting] = useState(false);
   const submitLockRef = useRef(false);
 
-  // Initialize cleanly whenever modal opens
+  // Initialize cleanly whenever modal opens (always default Issue Date to restaurant local today)
   useEffect(() => {
     if (isOpen) {
       setSelectedDeptId(departments[0]?.id || '');
       setShift('MORNING');
+      setIssueDate(getLocalDateKey(new Date(), timezone));
       const kitchenStaff = staffMembers.find((s) => s.role === 'DEPARTMENT_STAFF' && s.uid !== actorUid);
       if (kitchenStaff) {
         setSelectedReceiverUid(kitchenStaff.uid);
@@ -127,7 +133,15 @@ export const NewIssueSessionModal: React.FC<NewIssueSessionModalProps> = ({
       setSubmitting(false);
       submitLockRef.current = false;
     }
-  }, [isOpen]);
+  }, [isOpen, timezone]);
+
+  // Live Issue Date validation against restaurant local timezone (blocks future dates, detects backdated entries)
+  const issueDateValidation = useMemo(
+    () => validateSelectedIssueDate(issueDate, timezone),
+    [issueDate, timezone]
+  );
+  const todayDateKey = issueDateValidation.todayDateKey;
+  const isBackdatedEntry = issueDateValidation.valid && issueDateValidation.isBackdated;
 
   // Keep live available stock & WAC synced for items in the cart
   const liveCartItems = useMemo(() => {
@@ -261,6 +275,13 @@ export const NewIssueSessionModal: React.FC<NewIssueSessionModalProps> = ({
       setFormError('Please select a kitchen department.');
       return;
     }
+
+    const finalDateCheck = validateSelectedIssueDate(issueDate, timezone);
+    if (!finalDateCheck.valid) {
+      setFormError(finalDateCheck.error || 'Please select a valid Issue Date.');
+      return;
+    }
+
     if (!receivedByName.trim()) {
       setFormError('Please enter the Chef / Staff name receiving the stock.');
       return;
@@ -301,6 +322,7 @@ export const NewIssueSessionModal: React.FC<NewIssueSessionModalProps> = ({
         departmentId: selectedDeptId,
         departmentName: deptObj?.name || 'Kitchen',
         shift,
+        issueDate: finalDateCheck.normalizedDateKey,
         issuedByUid: actorUid,
         issuedByName: actorName,
         issuedByRole: actorRole || undefined,
@@ -347,103 +369,169 @@ export const NewIssueSessionModal: React.FC<NewIssueSessionModalProps> = ({
           </div>
         )}
 
-        {/* 1. Session Header: Department, Shift, Received By */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200">
-          <div>
-            <label
-              htmlFor="issue-dept-select"
-              className="block text-[11px] font-bold text-[#0D2149] uppercase tracking-wider mb-1"
-            >
-              Kitchen Department *
-            </label>
-            <select
-              id="issue-dept-select"
-              required
-              value={selectedDeptId}
-              onChange={(e) => setSelectedDeptId(e.target.value)}
-              className="w-full px-3 py-2 text-xs font-medium border border-stone-300 rounded-lg bg-white focus:outline-none focus:border-[#0D2149]"
-            >
-              {departments.length === 0 ? (
-                <option value="">No departments found</option>
-              ) : (
-                departments.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.name}
-                  </option>
-                ))
+        {/* 1. Session Header: Department, Shift, Issue Date, Received By */}
+        <div className="space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+            <div>
+              <label
+                htmlFor="issue-dept-select"
+                className="block text-[11px] font-bold text-[#0D2149] uppercase tracking-wider mb-1"
+              >
+                Kitchen Department *
+              </label>
+              <select
+                id="issue-dept-select"
+                required
+                value={selectedDeptId}
+                onChange={(e) => setSelectedDeptId(e.target.value)}
+                className="w-full min-h-[40px] px-3 py-2 text-xs font-medium border border-stone-300 rounded-lg bg-white focus:outline-none focus:border-[#0D2149]"
+              >
+                {departments.length === 0 ? (
+                  <option value="">No departments found</option>
+                ) : (
+                  departments.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.name}
+                    </option>
+                  ))
+                )}
+              </select>
+            </div>
+
+            <div>
+              <label
+                htmlFor="issue-shift-select"
+                className="block text-[11px] font-bold text-[#0D2149] uppercase tracking-wider mb-1"
+              >
+                Shift *
+              </label>
+              <select
+                id="issue-shift-select"
+                value={shift}
+                onChange={(e) => setShift(e.target.value as Issue['shift'])}
+                className="w-full min-h-[40px] px-3 py-2 text-xs font-medium border border-stone-300 rounded-lg bg-white focus:outline-none focus:border-[#0D2149]"
+              >
+                <option value="MORNING">Morning Shift</option>
+                <option value="EVENING">Evening Shift</option>
+                <option value="NIGHT">Night Shift</option>
+                <option value="GENERAL">General Store</option>
+              </select>
+            </div>
+
+            <div>
+              <label
+                htmlFor="issue-date-input"
+                className="flex items-center justify-between gap-1 text-[11px] font-bold text-[#0D2149] uppercase tracking-wider mb-1"
+              >
+                <span className="inline-flex items-center gap-1">
+                  <Calendar className="w-3.5 h-3.5 text-[#FF5A1F]" />
+                  <span>ISSUE DATE *</span>
+                </span>
+                {isBackdatedEntry ? (
+                  <span className="px-1.5 py-0.5 rounded bg-[#FF5A1F]/15 text-[#FF5A1F] text-[10px] font-extrabold normal-case">
+                    Backdated
+                  </span>
+                ) : (
+                  issueDate === todayDateKey && (
+                    <span className="text-[10px] font-semibold text-emerald-700 normal-case">
+                      Today
+                    </span>
+                  )
+                )}
+              </label>
+              <input
+                id="issue-date-input"
+                type="date"
+                required
+                max={todayDateKey}
+                value={issueDate}
+                onChange={(e) => {
+                  setIssueDate(e.target.value);
+                  if (formError) setFormError(null);
+                }}
+                className={`w-full min-h-[40px] px-3 py-2 text-sm sm:text-xs font-mono font-semibold border rounded-lg bg-white text-stone-900 focus:outline-none ${
+                  !issueDateValidation.valid
+                    ? 'border-rose-400 focus:border-rose-500'
+                    : isBackdatedEntry
+                    ? 'border-[#FF5A1F] focus:border-[#FF5A1F]'
+                    : 'border-stone-300 focus:border-[#0D2149]'
+                }`}
+              />
+              {!issueDateValidation.valid && issueDateValidation.error && (
+                <p id="issue-date-error" className="text-[11px] font-semibold text-rose-600 mt-1">
+                  {issueDateValidation.error}
+                </p>
               )}
-            </select>
+            </div>
+
+            <div>
+              <label
+                htmlFor="issue-received-by-input"
+                className="block text-[11px] font-bold text-[#0D2149] uppercase tracking-wider mb-1"
+              >
+                Received By (Chef / Staff) *
+              </label>
+              <input
+                id="issue-received-by-input"
+                type="text"
+                required
+                maxLength={100}
+                placeholder="e.g. Chef Sandip / Rahul"
+                value={receivedByName}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setReceivedByName(val);
+                  const exactStaff = staffMembers.find(
+                    (s) => s.name.trim().toLowerCase() === val.trim().toLowerCase()
+                  );
+                  setSelectedReceiverUid(exactStaff ? exactStaff.uid : '');
+                }}
+                className="w-full min-h-[40px] px-3 py-2 text-xs font-medium border border-stone-300 rounded-lg bg-white focus:outline-none focus:border-[#0D2149]"
+              />
+              {staffMembers.length > 0 && (
+                <div className="flex flex-wrap gap-1 mt-1.5">
+                  {staffMembers
+                    .filter((s) => s.uid !== actorUid && s.status !== 'inactive' && s.status !== 'INACTIVE')
+                    .slice(0, 4)
+                    .map((staff) => (
+                      <button
+                        key={staff.uid}
+                        type="button"
+                        onClick={() => {
+                          setSelectedReceiverUid(staff.uid);
+                          setReceivedByName(staff.name);
+                        }}
+                        className={`px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
+                          selectedReceiverUid === staff.uid
+                            ? 'bg-[#0D2149] text-white border-[#0D2149]'
+                            : 'bg-white text-stone-600 border-stone-200 hover:border-[#0D2149]/40'
+                        }`}
+                      >
+                        {staff.name}
+                      </button>
+                    ))}
+                </div>
+              )}
+            </div>
           </div>
 
-          <div>
-            <label
-              htmlFor="issue-shift-select"
-              className="block text-[11px] font-bold text-[#0D2149] uppercase tracking-wider mb-1"
+          {/* Backdated Entry Warning Banner */}
+          {isBackdatedEntry && (
+            <div
+              id="backdated-issue-warning"
+              className="p-3 rounded-xl bg-amber-50 border border-[#FF5A1F]/40 text-xs text-amber-950 flex items-start gap-2.5"
             >
-              Shift *
-            </label>
-            <select
-              id="issue-shift-select"
-              value={shift}
-              onChange={(e) => setShift(e.target.value as Issue['shift'])}
-              className="w-full px-3 py-2 text-xs font-medium border border-stone-300 rounded-lg bg-white focus:outline-none focus:border-[#0D2149]"
-            >
-              <option value="MORNING">Morning Shift</option>
-              <option value="EVENING">Evening Shift</option>
-              <option value="NIGHT">Night Shift</option>
-              <option value="GENERAL">General Store</option>
-            </select>
-          </div>
-
-          <div>
-            <label
-              htmlFor="issue-received-by-input"
-              className="block text-[11px] font-bold text-[#0D2149] uppercase tracking-wider mb-1"
-            >
-              Received By (Chef / Staff) *
-            </label>
-            <input
-              id="issue-received-by-input"
-              type="text"
-              required
-              maxLength={100}
-              placeholder="e.g. Chef Sandip / Rahul"
-              value={receivedByName}
-              onChange={(e) => {
-                const val = e.target.value;
-                setReceivedByName(val);
-                const exactStaff = staffMembers.find(
-                  (s) => s.name.trim().toLowerCase() === val.trim().toLowerCase()
-                );
-                setSelectedReceiverUid(exactStaff ? exactStaff.uid : '');
-              }}
-              className="w-full px-3 py-2 text-xs font-medium border border-stone-300 rounded-lg bg-white focus:outline-none focus:border-[#0D2149]"
-            />
-            {staffMembers.length > 0 && (
-              <div className="flex flex-wrap gap-1 mt-1.5">
-                {staffMembers
-                  .filter((s) => s.uid !== actorUid && s.status !== 'inactive' && s.status !== 'INACTIVE')
-                  .slice(0, 4)
-                  .map((staff) => (
-                    <button
-                      key={staff.uid}
-                      type="button"
-                      onClick={() => {
-                        setSelectedReceiverUid(staff.uid);
-                        setReceivedByName(staff.name);
-                      }}
-                      className={`px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
-                        selectedReceiverUid === staff.uid
-                          ? 'bg-[#0D2149] text-white border-[#0D2149]'
-                          : 'bg-white text-stone-600 border-stone-200 hover:border-[#0D2149]/40'
-                      }`}
-                    >
-                      {staff.name}
-                    </button>
-                  ))}
+              <AlertTriangle className="w-4 h-4 text-[#FF5A1F] shrink-0 mt-0.5" />
+              <div className="space-y-0.5">
+                <p className="font-bold text-[#0D2149]">
+                  Backdated Issue Date Selected: {formatDateKeyReadable(issueDate)}
+                </p>
+                <p className="text-[11px] leading-relaxed text-amber-900">
+                  You are recording a backdated stock issue. The stock will be deducted now, but the report will show the selected Issue Date.
+                </p>
               </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
 
         {/* 2. Searchable Item Selector + Quantity + Add to Session */}
@@ -691,36 +779,53 @@ export const NewIssueSessionModal: React.FC<NewIssueSessionModalProps> = ({
           </div>
         )}
 
-        {/* 5. Final Actions */}
-        <div className="pt-3 border-t border-stone-100 flex flex-col-reverse sm:flex-row sm:items-center justify-end gap-2">
-          <button
-            type="button"
-            disabled={submitting}
-            onClick={onClose}
-            className="px-4 py-2.5 sm:py-2 text-xs font-semibold text-stone-600 hover:bg-stone-50 rounded-lg border border-stone-200 disabled:opacity-50"
-          >
-            Cancel
-          </button>
-          <button
-            id="confirm-issue-session-btn"
-            type="submit"
-            disabled={submitting || liveCartItems.length === 0 || hasOverStockLine}
-            className="inline-flex items-center justify-center gap-2 px-5 py-2.5 sm:py-2 rounded-lg bg-[#FF5A1F] hover:bg-[#e24c16] text-white text-xs font-bold shadow-xs disabled:opacity-50 transition-colors"
-          >
-            {submitting ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                <span>Processing Atomic Issue...</span>
-              </>
-            ) : (
-              <>
-                <CheckCircle2 className="w-4 h-4" />
-                <span>
-                  Confirm &amp; Issue {totalItems} {totalItems === 1 ? 'Item' : 'Items'}
+        {/* 5. Final Actions with Confirmed Issue Date Display */}
+        <div className="pt-3 border-t border-stone-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="text-[11px] text-stone-600 flex items-center gap-1.5">
+            <Calendar className="w-3.5 h-3.5 text-[#FF5A1F] shrink-0" />
+            <span>
+              Issue Date:{' '}
+              <strong id="confirm-selected-issue-date" className="text-[#0D2149]">
+                {issueDateValidation.valid ? formatDateKeyReadable(issueDate) : 'Invalid Date'}
+              </strong>
+              {isBackdatedEntry && (
+                <span className="ml-1.5 px-1.5 py-0.5 rounded bg-[#FF5A1F]/15 text-[#FF5A1F] text-[10px] font-bold">
+                  Backdated
                 </span>
-              </>
-            )}
-          </button>
+              )}
+            </span>
+          </div>
+
+          <div className="flex flex-col-reverse sm:flex-row sm:items-center justify-end gap-2">
+            <button
+              type="button"
+              disabled={submitting}
+              onClick={onClose}
+              className="px-4 py-2.5 sm:py-2 text-xs font-semibold text-stone-600 hover:bg-stone-50 rounded-lg border border-stone-200 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              id="confirm-issue-session-btn"
+              type="submit"
+              disabled={submitting || liveCartItems.length === 0 || hasOverStockLine || !issueDateValidation.valid}
+              className="inline-flex items-center justify-center gap-2 px-5 py-2.5 sm:py-2 rounded-lg bg-[#FF5A1F] hover:bg-[#e24c16] text-white text-xs font-bold shadow-xs disabled:opacity-50 transition-colors"
+            >
+              {submitting ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Processing Atomic Issue...</span>
+                </>
+              ) : (
+                <>
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>
+                    Confirm &amp; Issue {totalItems} {totalItems === 1 ? 'Item' : 'Items'}
+                  </span>
+                </>
+              )}
+            </button>
+          </div>
         </div>
       </form>
     </Modal>

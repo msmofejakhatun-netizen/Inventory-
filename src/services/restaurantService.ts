@@ -22,6 +22,13 @@ import { handleFirestoreError, OperationType } from '../firebase/errorHandler';
 import { calculateWeightedAverageCost } from './calculations';
 import { validateDisplayName } from '../utils/profileValidation';
 import {
+  formatDateKeyReadable,
+  getLocalDateKey,
+  getLocalTimeString,
+  resolveSafeTimeZone,
+  validateSelectedIssueDate,
+} from '../utils/issueManagement';
+import {
   Restaurant,
   RestaurantUser,
   StaffInvitation,
@@ -551,6 +558,7 @@ export interface MultiItemIssueSessionInput {
   issuedByRole?: UserRole;
   receivedByUid?: string | null;
   receivedByName: string;
+  issueDate?: string; // Optional manual Issue Date (YYYY-MM-DD in restaurant timezone); defaults to restaurant local today
   timezone?: string;
   items: MultiItemIssueSessionLineInput[];
   managerSignatureDataUrl?: string | null;
@@ -559,6 +567,9 @@ export interface MultiItemIssueSessionInput {
 export interface MultiItemIssueSessionResult {
   sessionId: string;
   issueNumber: string;
+  issueDate: string;
+  isBackdated: boolean;
+  createdAt: string;
   totalItems: number;
   totalValue: number;
 }
@@ -640,31 +651,20 @@ export async function executeMultiItemIssueSessionTransaction(
   const nowDate = new Date();
   const now = nowDate.toISOString();
 
-  // Compute restaurant-local issue date and time
-  const resolveTz = (tz?: string) => {
-    const candidate = (tz || '').trim() || 'Asia/Kolkata';
-    try {
-      new Intl.DateTimeFormat('en-CA', { timeZone: candidate }).format(nowDate);
-      return candidate;
-    } catch {
-      return 'Asia/Kolkata';
-    }
-  };
-  const timezone = resolveTz(input.timezone);
-  const dateParts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: timezone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(nowDate);
-  const issueDate = `${dateParts.find((p) => p.type === 'year')?.value}-${dateParts.find((p) => p.type === 'month')?.value}-${dateParts.find((p) => p.type === 'day')?.value}`;
-  const timeParts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: timezone,
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).formatToParts(nowDate);
-  const issueTime = `${timeParts.find((p) => p.type === 'hour')?.value}:${timeParts.find((p) => p.type === 'minute')?.value}`;
+  // Resolve restaurant local timezone and validate manual or default Issue Date
+  // IMPORTANT: `now` (`createdAt`) ALWAYS stays the actual system entry timestamp and is NEVER overwritten.
+  const timezone = resolveSafeTimeZone(input.timezone);
+  const todayDateKey = getLocalDateKey(nowDate, timezone);
+  const requestedDateKey =
+    input.issueDate !== undefined ? String(input.issueDate).trim() : todayDateKey;
+  const dateValidation = validateSelectedIssueDate(requestedDateKey, timezone, nowDate);
+  if (!dateValidation.valid) {
+    throw new Error(dateValidation.error || 'Please select a valid Issue Date.');
+  }
+
+  const issueDate = dateValidation.normalizedDateKey;
+  const isBackdated = dateValidation.isBackdated;
+  const issueTime = getLocalTimeString(nowDate, timezone);
 
   class IssueSessionValidationError extends Error {
     constructor(message: string) {
@@ -771,6 +771,8 @@ export async function executeMultiItemIssueSessionTransaction(
           id: entry.issueRef.id,
           sessionId,
           issueNumber,
+          issueDate,
+          isBackdated,
           departmentId: input.departmentId,
           departmentName: input.departmentName,
           itemId: entry.liveItem.id,
@@ -789,7 +791,7 @@ export async function executeMultiItemIssueSessionTransaction(
         };
         transaction.set(entry.issueRef, issueDoc);
 
-        // Write immutable StockTransaction ledger entry
+        // Write immutable StockTransaction ledger entry (keeps actual deduction timestamp `now`)
         const txnRef = doc(getTenantCol(restaurantId, 'stockTransactions'));
         const txn: StockTransaction = {
           id: txnRef.id,
@@ -809,7 +811,9 @@ export async function executeMultiItemIssueSessionTransaction(
           actorUid: input.issuedByUid,
           actorName: input.issuedByName,
           referenceId: sessionId,
-          reason: `Issue ${issueNumber} to ${input.departmentName} (${input.shift} shift) — Received by ${receivedByName}`,
+          reason: `Issue ${issueNumber} (Issue Date: ${formatDateKeyReadable(issueDate)}${
+            isBackdated ? ' — Backdated' : ''
+          }) to ${input.departmentName} (${input.shift} shift) — Received by ${receivedByName}`,
           restaurantId,
           createdAt: now,
         };
@@ -832,6 +836,7 @@ export async function executeMultiItemIssueSessionTransaction(
         issueDate,
         issueTime,
         timezone,
+        isBackdated,
         restaurantId,
         departmentId: input.departmentId,
         departmentName: input.departmentName,
@@ -857,10 +862,10 @@ export async function executeMultiItemIssueSessionTransaction(
         actorUid: input.issuedByUid,
         actorName: input.issuedByName,
         ...(input.issuedByRole ? { actorRole: input.issuedByRole } : {}),
-        action: 'STOCK_ISSUE_SESSION_CREATED',
+        action: isBackdated ? 'STOCK_ISSUE_SESSION_CREATED_BACKDATED' : 'STOCK_ISSUE_SESSION_CREATED',
         entity: 'IssueSession',
         entityId: sessionId,
-        details: `Created Issue ${issueNumber} (${sessionItems.length} items, value ${sessionTotalValue.toFixed(2)}) for ${input.departmentName} (${input.shift} shift), received by ${receivedByName}`,
+        details: `${isBackdated ? '[BACKDATED ENTRY] ' : ''}Created Issue ${issueNumber} | Issue Date: ${issueDate} | Entry Recorded At: ${now} | ${sessionItems.length} items, value ${sessionTotalValue.toFixed(2)} for ${input.departmentName} (${input.shift} shift), received by ${receivedByName}`,
         restaurantId,
         createdAt: now,
       };
@@ -870,6 +875,9 @@ export async function executeMultiItemIssueSessionTransaction(
     return {
       sessionId,
       issueNumber: finalIssueNumber,
+      issueDate,
+      isBackdated,
+      createdAt: now,
       totalItems: input.items.length,
       totalValue: finalTotalValue,
     };

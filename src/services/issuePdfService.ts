@@ -3,9 +3,12 @@ import { IssueSession } from '../types';
 import {
   IssueDateRange,
   buildDepartmentIssueSummary,
+  buildShiftIssueSummary,
+  formatDateKeyReadable,
   formatDateTimeInTimeZone,
   formatQty,
   formatShiftLabel,
+  isIssueSessionBackdated,
   resolveSafeTimeZone,
 } from '../utils/issueManagement';
 import {
@@ -94,10 +97,12 @@ export function buildStoreToKitchenIssuePdf(options: IssueReportPdfOptions): jsP
   const contentWidth = pageWidth - marginX * 2; // 186mm
   const usableBottomY = pageHeight - A4_LAYOUT.footerReservedHeight;
 
-  // Order sessions chronologically ascending within the report (ISS-001, ISS-002, ...)
-  const orderedSessions = [...sessions].sort((a, b) =>
-    (a.createdAt || '').localeCompare(b.createdAt || '')
-  );
+  // Order sessions chronologically ascending by selected Issue Date, then creation timestamp
+  const orderedSessions = [...sessions].sort((a, b) => {
+    const dateCmp = (a.issueDate || '').localeCompare(b.issueDate || '');
+    if (dateCmp !== 0) return dateCmp;
+    return (a.createdAt || '').localeCompare(b.createdAt || '');
+  });
 
   const totalSessions = orderedSessions.length;
   const totalItemsIssued = orderedSessions.reduce(
@@ -108,6 +113,7 @@ export function buildStoreToKitchenIssuePdf(options: IssueReportPdfOptions): jsP
     orderedSessions.reduce((sum, s) => sum + (Number(s.totalValue) || 0), 0).toFixed(2)
   );
   const departmentSummary = buildDepartmentIssueSummary(orderedSessions);
+  const shiftSummary = buildShiftIssueSummary(orderedSessions);
 
   const headerOptions: PdfHeaderOptions = {
     restaurantName: restaurantName || 'Restaurant',
@@ -211,6 +217,72 @@ export function buildStoreToKitchenIssuePdf(options: IssueReportPdfOptions): jsP
     cursorY += 6;
   }
 
+  // Shift-wise Issue Summary table
+  if (shiftSummary.length > 0) {
+    if (cursorY + 20 > usableBottomY) {
+      cursorY = startNewPage('Shift-wise Issue Summary');
+    }
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.2);
+    drawPdfText(doc, 'Shift-wise Issue Summary', marginX, cursorY, { color: NAVY });
+    cursorY += 2.6;
+
+    const drawShiftHeader = (y: number): number => {
+      doc.setFillColor(241, 245, 249);
+      doc.setDrawColor(...BORDER);
+      doc.rect(marginX, y, contentWidth, 6.5, 'FD');
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.8);
+      drawPdfText(doc, 'Shift', marginX + 3, y + 4.4, { color: NAVY });
+      drawPdfText(doc, 'Sessions', marginX + 104, y + 4.4, { align: 'right', color: NAVY });
+      drawPdfText(doc, 'Items Issued', marginX + 136, y + 4.4, { align: 'right', color: NAVY });
+      drawPdfText(doc, 'Total Value', marginX + contentWidth - 3, y + 4.4, {
+        align: 'right',
+        color: NAVY,
+      });
+      return y + 6.5;
+    };
+
+    cursorY = drawShiftHeader(cursorY);
+
+    shiftSummary.forEach((row, idx) => {
+      if (cursorY + 6.5 > usableBottomY) {
+        cursorY = startNewPage('Shift-wise Issue Summary (Continued)');
+        cursorY = drawShiftHeader(cursorY);
+      }
+      if (idx % 2 === 1) {
+        doc.setFillColor(...ZEBRA_BG);
+        doc.rect(marginX, cursorY, contentWidth, 6.2, 'F');
+      }
+      doc.setDrawColor(226, 232, 240);
+      doc.line(marginX, cursorY + 6.2, marginX + contentWidth, cursorY + 6.2);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8);
+      drawPdfText(doc, row.shiftLabel, marginX + 3, cursorY + 4.3, { color: SLATE_900 });
+      drawPdfText(doc, String(row.sessionCount), marginX + 104, cursorY + 4.3, {
+        align: 'right',
+        color: SLATE_900,
+      });
+      drawPdfText(doc, String(row.itemCount), marginX + 136, cursorY + 4.3, {
+        align: 'right',
+        color: SLATE_900,
+      });
+      doc.setFont('helvetica', 'bold');
+      drawPdfText(
+        doc,
+        formatInrAmount(row.totalValue, currencySymbol),
+        marginX + contentWidth - 3,
+        cursorY + 4.3,
+        { align: 'right', color: SLATE_900 }
+      );
+      cursorY += 6.2;
+    });
+
+    cursorY += 6;
+  }
+
   // Empty state if no sessions exist in selected period
   if (orderedSessions.length === 0) {
     doc.setFillColor(...LIGHT_BG);
@@ -231,8 +303,12 @@ export function buildStoreToKitchenIssuePdf(options: IssueReportPdfOptions): jsP
   // 3. SEPARATE SECTION FOR EACH ISSUE SESSION
   // -------------------------------------------------------------------------
   orderedSessions.forEach((session, sIdx) => {
-    // Ensure enough room for session header + metadata + table header + at least 2 rows (~46mm)
-    if (cursorY + 46 > usableBottomY) {
+    const backdated = isIssueSessionBackdated(session, tz);
+    const formattedIssueDate = formatDateKeyReadable(session.issueDate);
+    const formattedRecordedOn = formatDateTimeInTimeZone(session.createdAt, tz);
+
+    // Ensure enough room for session header + metadata + table header + at least 2 rows (~52mm)
+    if (cursorY + 52 > usableBottomY) {
       cursorY = startNewPage();
     }
 
@@ -245,21 +321,25 @@ export function buildStoreToKitchenIssuePdf(options: IssueReportPdfOptions): jsP
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(9.2);
     doc.setTextColor(255, 255, 255);
-    doc.text(`Issue #${session.issueNumber}`, marginX + 5, cursorY + 5.3);
+    doc.text(
+      `Issue #${session.issueNumber}${backdated ? '  [BACKDATED]' : ''}`,
+      marginX + 5,
+      cursorY + 5.3
+    );
 
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(7.8);
     doc.setTextColor(226, 232, 240);
     doc.text(
-      `Session ${sIdx + 1} of ${orderedSessions.length}  |  ${formatDateTimeInTimeZone(session.createdAt, tz)}`,
+      `Session ${sIdx + 1} of ${orderedSessions.length}  |  Issue Date: ${formattedIssueDate}`,
       pageWidth - marginX - 3,
       cursorY + 5.3,
       { align: 'right' }
     );
     cursorY += 8;
 
-    // Session Metadata Card
-    const metaHeight = 14;
+    // Session Metadata Card (3 clean rows: Dept/Shift, Issue Date/Recorded On, Issued By/Received By)
+    const metaHeight = 19.5;
     doc.setFillColor(...LIGHT_BG);
     doc.setDrawColor(...BORDER);
     doc.rect(marginX, cursorY, contentWidth, metaHeight, 'FD');
@@ -268,34 +348,49 @@ export function buildStoreToKitchenIssuePdf(options: IssueReportPdfOptions): jsP
     const col2X = marginX + contentWidth / 2 + 2;
 
     doc.setFontSize(8);
-    // Row 1
+    // Row 1: Issue Date & Entry Recorded On
     doc.setFont('helvetica', 'bold');
-    drawPdfText(doc, 'Kitchen Department:', col1X, cursorY + 5, { color: SLATE_600 });
-    drawPdfText(doc, (session.departmentName || 'Kitchen').substring(0, 34), col1X + 33, cursorY + 5, {
+    drawPdfText(doc, 'Issue Date:', col1X, cursorY + 5, { color: SLATE_600 });
+    drawPdfText(
+      doc,
+      `${formattedIssueDate}${backdated ? ' (Backdated)' : ''}`,
+      col1X + 20,
+      cursorY + 5,
+      { color: backdated ? ORANGE : NAVY }
+    );
+
+    drawPdfText(doc, 'Entry Recorded On:', col2X, cursorY + 5, { color: SLATE_600 });
+    doc.setFont('helvetica', 'normal');
+    drawPdfText(doc, formattedRecordedOn, col2X + 31, cursorY + 5, { color: SLATE_900 });
+
+    // Row 2: Kitchen Department & Shift
+    doc.setFont('helvetica', 'bold');
+    drawPdfText(doc, 'Kitchen Department:', col1X, cursorY + 10.5, { color: SLATE_600 });
+    drawPdfText(doc, (session.departmentName || 'Kitchen').substring(0, 34), col1X + 33, cursorY + 10.5, {
       color: SLATE_900,
     });
 
-    drawPdfText(doc, 'Shift:', col2X, cursorY + 5, { color: SLATE_600 });
-    drawPdfText(doc, formatShiftLabel(session.shift), col2X + 12, cursorY + 5, { color: SLATE_900 });
+    drawPdfText(doc, 'Shift:', col2X, cursorY + 10.5, { color: SLATE_600 });
+    drawPdfText(doc, formatShiftLabel(session.shift), col2X + 12, cursorY + 10.5, { color: SLATE_900 });
 
-    // Row 2
-    drawPdfText(doc, 'Issued By:', col1X, cursorY + 10.5, { color: SLATE_600 });
+    // Row 3: Issued By & Received By
+    drawPdfText(doc, 'Issued By:', col1X, cursorY + 16, { color: SLATE_600 });
     doc.setFont('helvetica', 'normal');
     drawPdfText(
       doc,
       (session.issuedByName || 'Storekeeper').substring(0, 36),
       col1X + 18,
-      cursorY + 10.5,
+      cursorY + 16,
       { color: SLATE_900 }
     );
 
     doc.setFont('helvetica', 'bold');
-    drawPdfText(doc, 'Received By:', col2X, cursorY + 10.5, { color: SLATE_600 });
+    drawPdfText(doc, 'Received By:', col2X, cursorY + 16, { color: SLATE_600 });
     drawPdfText(
       doc,
       (session.receivedByName || 'Chef / Staff').substring(0, 36),
       col2X + 22,
-      cursorY + 10.5,
+      cursorY + 16,
       { color: SLATE_900 }
     );
 

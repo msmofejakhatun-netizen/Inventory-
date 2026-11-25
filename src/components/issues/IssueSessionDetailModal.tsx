@@ -13,9 +13,11 @@ import { Badge } from '../common/Badge';
 import {
   canUserSignManagerSignature,
   canUserSignReceiverSignature,
+  formatDateKeyReadable,
   formatDateTimeInTimeZone,
   formatQty,
   formatShiftLabel,
+  isIssueSessionBackdated,
 } from '../../utils/issueManagement';
 
 interface IssueSessionDetailModalProps {
@@ -46,6 +48,7 @@ export const IssueSessionDetailModal: React.FC<IssueSessionDetailModalProps> = (
 
   const mgrSigned = session.managerSignature?.status === 'SIGNED';
   const rcvSigned = session.receiverSignature?.status === 'SIGNED';
+  const backdated = isIssueSessionBackdated(session, timezone);
 
   return (
     <Modal
@@ -60,10 +63,18 @@ export const IssueSessionDetailModal: React.FC<IssueSessionDetailModalProps> = (
         {/* Session Summary Header */}
         <div className="rounded-xl bg-[#0D2149] text-white p-4 space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="px-2.5 py-1 rounded-md bg-[#FF5A1F] text-white font-mono font-extrabold text-xs">
                 #{session.issueNumber}
               </span>
+              <span className="px-2.5 py-1 rounded-md bg-white/15 text-white font-mono font-bold text-[11px]">
+                Issue Date: {formatDateKeyReadable(session.issueDate)}
+              </span>
+              {backdated && (
+                <span className="px-2 py-0.5 rounded bg-amber-400/20 text-amber-200 border border-amber-400/40 text-[10px] font-bold">
+                  Backdated Entry
+                </span>
+              )}
               {session.isLegacy && (
                 <span className="px-2 py-0.5 rounded bg-white/15 text-slate-200 text-[10px] font-semibold">
                   Legacy Record
@@ -71,7 +82,7 @@ export const IssueSessionDetailModal: React.FC<IssueSessionDetailModalProps> = (
               )}
             </div>
             <span className="text-[11px] font-mono text-slate-300">
-              {formatDateTimeInTimeZone(session.createdAt, timezone || session.timezone)}
+              Entry Recorded On: {formatDateTimeInTimeZone(session.createdAt, timezone || session.timezone)}
             </span>
           </div>
 

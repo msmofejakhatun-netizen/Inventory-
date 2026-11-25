@@ -81,14 +81,31 @@ service cloud.firestore {
              );
     }
 
+    function isValidIssueDateNotFuture(issueDate) {
+      let parts = issueDate.split('-');
+      return issueDate is string &&
+             issueDate.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
+             parts.size() == 3 &&
+             int(parts[0]) >= 2000 &&
+             int(parts[0]) <= 2100 &&
+             int(parts[1]) >= 1 &&
+             int(parts[1]) <= 12 &&
+             int(parts[2]) >= 1 &&
+             int(parts[2]) <= 31 &&
+             timestamp.date(int(parts[0]), int(parts[1]), int(parts[2])) <= request.time + duration.value(14, 'h');
+    }
+
     function isValidIssueSessionCreate(data, restaurantId) {
       return data.restaurantId == restaurantId &&
              data.issuedByUid == request.auth.uid &&
              data.issueNumber is string &&
              data.issueNumber.size() >= 4 &&
              data.issueNumber.size() <= 30 &&
-             data.issueDate is string &&
-             data.issueDate.matches('^\\d{4}-\\d{2}-\\d{2}$') &&
+             isValidIssueDateNotFuture(data.issueDate) &&
+             (!('isBackdated' in data) || data.isBackdated is bool) &&
+             data.createdAt is string &&
+             data.createdAt.size() >= 10 &&
+             data.createdAt.size() <= 40 &&
              data.departmentId is string &&
              data.departmentId.size() > 0 &&
              data.departmentName is string &&
@@ -369,7 +386,10 @@ service cloud.firestore {
       // Issues to departments (item-level ledger records)
       match /issues/{issueId} {
         allow get, list: if isMemberOfRestaurant(restaurantId);
-        allow create, update: if isStorekeeper(restaurantId);
+        allow create: if isStorekeeper(restaurantId) &&
+          (!('issueDate' in request.resource.data) || isValidIssueDateNotFuture(request.resource.data.issueDate));
+        allow update: if isStorekeeper(restaurantId) &&
+          (!('issueDate' in request.resource.data) || isValidIssueDateNotFuture(request.resource.data.issueDate));
         allow delete: if isRestaurantOwner(restaurantId);
       }
 

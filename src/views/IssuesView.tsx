@@ -33,12 +33,15 @@ import {
   canUserSignReceiverSignature,
   combineIssueSessionsWithLegacyRecords,
   filterIssueSessionsByDateRange,
+  formatDateKeyReadable,
   formatDateTimeInTimeZone,
   formatQty,
   formatShiftLabel,
   getIssueDateRange,
   getLocalDateKey,
+  isIssueSessionBackdated,
   resolveSafeTimeZone,
+  shiftDateKey,
 } from '../utils/issueManagement';
 
 export const IssuesView: React.FC = () => {
@@ -67,9 +70,10 @@ export const IssuesView: React.FC = () => {
     getLocalDateKey(new Date(), activeRestaurant?.timezone)
   );
 
-  // Search & Department Filters
+  // Search, Department & Shift Filters
   const [searchQuery, setSearchQuery] = useState('');
   const [filterDeptId, setFilterDeptId] = useState('ALL');
+  const [filterShift, setFilterShift] = useState<'ALL' | Issue['shift']>('ALL');
 
   // Modals & Active Selections
   const [isNewSessionModalOpen, setIsNewSessionModalOpen] = useState(false);
@@ -180,22 +184,25 @@ export const IssuesView: React.FC = () => {
     [allSessions, activeDateRange, restaurantTimeZone]
   );
 
-  // Apply department & text search filters on top of date filter
+  // Apply department, shift & text search filters on top of Issue Date filter
   const visibleSessions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return dateFilteredSessions.filter((session) => {
       const matchesDept = filterDeptId === 'ALL' || session.departmentId === filterDeptId;
       if (!matchesDept) return false;
+      const matchesShift = filterShift === 'ALL' || session.shift === filterShift;
+      if (!matchesShift) return false;
       if (!q) return true;
       const inHeader =
         (session.issueNumber || '').toLowerCase().includes(q) ||
         (session.departmentName || '').toLowerCase().includes(q) ||
         (session.receivedByName || '').toLowerCase().includes(q) ||
-        (session.issuedByName || '').toLowerCase().includes(q);
+        (session.issuedByName || '').toLowerCase().includes(q) ||
+        (session.issueDate || '').toLowerCase().includes(q);
       if (inHeader) return true;
       return (session.items || []).some((it) => (it.itemName || '').toLowerCase().includes(q));
     });
-  }, [dateFilteredSessions, filterDeptId, searchQuery]);
+  }, [dateFilteredSessions, filterDeptId, filterShift, searchQuery]);
 
   // Live viewing session reference so signatures update immediately in the detail modal
   const liveViewingSession = useMemo(
@@ -229,15 +236,32 @@ export const IssuesView: React.FC = () => {
   };
 
   const handleSessionCreated = (result: MultiItemIssueSessionResult) => {
+    const formattedDate = formatDateKeyReadable(result.issueDate);
     showNotice(
       'success',
-      `Issue #${result.issueNumber} confirmed! ${result.totalItems} ${
+      `Issue #${result.issueNumber} confirmed for ${formattedDate}${
+        result.isBackdated ? ' (Backdated Entry)' : ''
+      }! ${result.totalItems} ${
         result.totalItems === 1 ? 'item' : 'items'
       } deducted atomically (${currencySymbol}${result.totalValue.toFixed(2)}).`
     );
-    // Switch to Today filter if user was browsing Yesterday so the newly created session is visible immediately
-    if (datePreset === 'YESTERDAY') {
-      setDatePreset('TODAY');
+
+    // If the confirmed Issue Date falls outside the active date filter, automatically focus that Issue Date
+    const isInsideCurrentRange =
+      result.issueDate >= activeDateRange.startDateKey &&
+      result.issueDate <= activeDateRange.endDateKey;
+    if (!isInsideCurrentRange) {
+      const todayKey = getLocalDateKey(new Date(), restaurantTimeZone);
+      const yesterdayKey = shiftDateKey(todayKey, -1);
+      if (result.issueDate === todayKey) {
+        setDatePreset('TODAY');
+      } else if (result.issueDate === yesterdayKey) {
+        setDatePreset('YESTERDAY');
+      } else {
+        setCustomStartDate(result.issueDate);
+        setCustomEndDate(result.issueDate);
+        setDatePreset('CUSTOM');
+      }
     }
   };
 
@@ -300,8 +324,9 @@ export const IssuesView: React.FC = () => {
   const handleExportCsv = () => {
     const headers = [
       'Issue ID',
-      'Date',
-      'Time',
+      'Issue Date',
+      'Backdated',
+      'Entry Recorded On',
       'Department',
       'Shift',
       'Issued By',
@@ -316,11 +341,14 @@ export const IssuesView: React.FC = () => {
     ];
     const rows: (string | number)[][] = [];
     for (const s of visibleSessions) {
+      const backdated = isIssueSessionBackdated(s, restaurantTimeZone);
+      const recordedOn = formatDateTimeInTimeZone(s.createdAt, restaurantTimeZone || s.timezone);
       for (const item of s.items || []) {
         rows.push([
           s.issueNumber,
           s.issueDate,
-          s.issueTime,
+          backdated ? 'Yes' : 'No',
+          recordedOn,
           s.departmentName,
           formatShiftLabel(s.shift),
           s.issuedByName,
@@ -513,7 +541,7 @@ export const IssuesView: React.FC = () => {
           </div>
         )}
 
-        {/* Search & Department Filter */}
+        {/* Search, Department & Shift Filter */}
         <div className="pt-2 border-t border-stone-100 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
           <div className="relative flex-1">
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-stone-400" />
@@ -539,6 +567,19 @@ export const IssuesView: React.FC = () => {
                 {d.name}
               </option>
             ))}
+          </select>
+
+          <select
+            id="issue-history-shift-filter"
+            value={filterShift}
+            onChange={(e) => setFilterShift(e.target.value as 'ALL' | Issue['shift'])}
+            className="px-3 py-2 text-xs border border-stone-200 rounded-lg bg-white text-stone-700 font-medium focus:outline-none focus:border-[#0D2149]"
+          >
+            <option value="ALL">All Shifts</option>
+            <option value="MORNING">Morning Shift</option>
+            <option value="EVENING">Evening Shift</option>
+            <option value="NIGHT">Night Shift</option>
+            <option value="GENERAL">General Store</option>
           </select>
         </div>
       </div>
@@ -624,7 +665,7 @@ export const IssuesView: React.FC = () => {
                 <thead className="bg-[#0D2149] text-white text-[11px] font-bold uppercase tracking-wider">
                   <tr>
                     <th className="py-3.5 px-4">Issue ID</th>
-                    <th className="py-3.5 px-4">Date &amp; Time</th>
+                    <th className="py-3.5 px-4">Issue Date</th>
                     <th className="py-3.5 px-4">Department &amp; Shift</th>
                     <th className="py-3.5 px-4 text-center">Items</th>
                     <th className="py-3.5 px-4">Issued By / Received By</th>
@@ -640,6 +681,7 @@ export const IssuesView: React.FC = () => {
                     const rcvSigned = session.receiverSignature?.status === 'SIGNED';
                     const canSignMgr = canUserSignManagerSignature(session, user?.uid, activeRole);
                     const canSignRcv = canUserSignReceiverSignature(session, user?.uid, activeRole);
+                    const backdated = isIssueSessionBackdated(session, restaurantTimeZone);
                     const previewItems = (session.items || [])
                       .slice(0, 2)
                       .map((it) => `${it.itemName} (${formatQty(it.quantity)} ${it.unit})`)
@@ -661,11 +703,24 @@ export const IssuesView: React.FC = () => {
                           )}
                         </td>
 
-                        <td className="py-3.5 px-4 whitespace-nowrap font-mono text-[11px] text-stone-600">
-                          {formatDateTimeInTimeZone(
-                            session.createdAt,
-                            restaurantTimeZone || session.timezone
-                          )}
+                        <td className="py-3.5 px-4 whitespace-nowrap">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-mono font-bold text-xs text-[#0D2149]">
+                              {formatDateKeyReadable(session.issueDate)}
+                            </span>
+                            {backdated && (
+                              <span className="px-1.5 py-0.5 rounded bg-[#FF5A1F]/12 text-[#FF5A1F] text-[10px] font-bold">
+                                Backdated
+                              </span>
+                            )}
+                          </div>
+                          <div className="font-mono text-[10px] text-stone-400 mt-0.5">
+                            Recorded:{' '}
+                            {formatDateTimeInTimeZone(
+                              session.createdAt,
+                              restaurantTimeZone || session.timezone
+                            )}
+                          </div>
                         </td>
 
                         <td className="py-3.5 px-4">
@@ -773,6 +828,7 @@ export const IssuesView: React.FC = () => {
               const rcvSigned = session.receiverSignature?.status === 'SIGNED';
               const canSignMgr = canUserSignManagerSignature(session, user?.uid, activeRole);
               const canSignRcv = canUserSignReceiverSignature(session, user?.uid, activeRole);
+              const backdated = isIssueSessionBackdated(session, restaurantTimeZone);
 
               return (
                 <div
@@ -790,15 +846,25 @@ export const IssuesView: React.FC = () => {
                           {session.items?.length || session.totalItems || 0}{' '}
                           {(session.items?.length || 0) === 1 ? 'Item' : 'Items'}
                         </span>
+                        {backdated && (
+                          <span className="px-1.5 py-0.5 rounded bg-[#FF5A1F]/12 text-[#FF5A1F] text-[10px] font-bold">
+                            Backdated
+                          </span>
+                        )}
                         {session.isLegacy && (
                           <span className="px-1.5 py-0.5 rounded bg-stone-200 text-stone-600 text-[10px] font-semibold">
                             Legacy
                           </span>
                         )}
                       </div>
-                      <p className="text-[11px] font-mono text-stone-500 mt-1 flex items-center gap-1">
+                      <p className="text-[11px] font-mono font-bold text-[#0D2149] mt-1 flex items-center gap-1">
+                        <Calendar className="w-3 h-3 text-[#FF5A1F]" />
+                        <span>Issue Date: {formatDateKeyReadable(session.issueDate)}</span>
+                      </p>
+                      <p className="text-[10px] font-mono text-stone-400 mt-0.5 flex items-center gap-1">
                         <Clock className="w-3 h-3" />
                         <span>
+                          Recorded:{' '}
                           {formatDateTimeInTimeZone(
                             session.createdAt,
                             restaurantTimeZone || session.timezone

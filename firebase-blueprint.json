@@ -226,6 +226,8 @@
         "id": { "type": "string" },
         "sessionId": { "type": "string" },
         "issueNumber": { "type": "string", "maxLength": 30 },
+        "issueDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "isBackdated": { "type": "boolean" },
         "departmentId": { "type": "string" },
         "departmentName": { "type": "string" },
         "itemId": { "type": "string" },
@@ -246,7 +248,7 @@
     },
     "IssueSession": {
       "title": "IssueSession",
-      "description": "Multi-item Store to Kitchen issue session with unique Issue ID and separate Manager and Chef/Staff digital signatures",
+      "description": "Multi-item Store to Kitchen issue session with unique Issue ID, separate Issue Date and creation timestamp, and separate Manager and Chef/Staff digital signatures",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
@@ -254,6 +256,7 @@
         "issueDate": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
         "issueTime": { "type": "string", "maxLength": 10 },
         "timezone": { "type": "string", "maxLength": 60 },
+        "isBackdated": { "type": "boolean" },
         "restaurantId": { "type": "string" },
         "departmentId": { "type": "string" },
         "departmentName": { "type": "string", "maxLength": 120 },

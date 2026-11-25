@@ -222,6 +222,8 @@ export interface Issue {
   id: string;
   sessionId?: string;
   issueNumber?: string;
+  issueDate?: string; // Actual selected business issue date (YYYY-MM-DD in restaurant timezone)
+  isBackdated?: boolean;
   departmentId: string;
   departmentName: string;
   itemId: string;
@@ -236,7 +238,7 @@ export interface Issue {
   issuedByName: string;
   shift: 'MORNING' | 'EVENING' | 'NIGHT' | 'GENERAL';
   restaurantId: string;
-  createdAt: string;
+  createdAt: string; // Actual system entry creation timestamp (ISO)
 }
 
 export interface IssueSignature {
@@ -261,9 +263,10 @@ export interface IssueSessionItem {
 export interface IssueSession {
   id: string;
   issueNumber: string;
-  issueDate: string; // YYYY-MM-DD in restaurant local timezone
+  issueDate: string; // Actual selected business issue date (YYYY-MM-DD in restaurant local timezone)
   issueTime: string; // HH:mm in restaurant local timezone
   timezone: string;
+  isBackdated?: boolean; // True when issueDate < local calendar date of createdAt
   restaurantId: string;
   departmentId: string;
   departmentName: string;
@@ -279,7 +282,7 @@ export interface IssueSession {
   managerSignature: IssueSignature;
   receiverSignature: IssueSignature;
   isLegacy?: boolean;
-  createdAt: string;
+  createdAt: string; // Actual system entry creation timestamp (ISO)
   updatedAt?: string;
 }
 
