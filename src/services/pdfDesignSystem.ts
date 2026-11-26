@@ -25,6 +25,7 @@ export interface PdfHeaderOptions {
   generatedAt?: Date;
   timezone?: string;
   rightMetaLabel?: string;
+  compact?: boolean;
 }
 
 export interface PdfTableColumn {
@@ -43,6 +44,7 @@ export interface PdfTableRenderOptions {
   headerOptions: PdfHeaderOptions;
   emptyMessage?: string;
   highlightStatusRows?: boolean;
+  compact?: boolean;
 }
 
 export const STOQO_PDF_COLORS = {
@@ -249,10 +251,12 @@ export function drawStoqoBrandLogo(
   doc: jsPDF,
   x: number,
   y: number,
-  variant: 'full' | 'compact' = 'full'
+  variant: 'full' | 'medium' | 'compact' | 'micro' = 'full'
 ): void {
-  const iconSize = variant === 'full' ? 12 : 7;
-  const radius = variant === 'full' ? 2.4 : 1.5;
+  const iconSize =
+    variant === 'full' ? 12 : variant === 'medium' ? 8.8 : variant === 'compact' ? 7 : 5.6;
+  const radius =
+    variant === 'full' ? 2.4 : variant === 'medium' ? 1.8 : variant === 'compact' ? 1.5 : 1.2;
 
   // Deep Navy 1:1 square badge
   doc.setFillColor(...STOQO_PDF_COLORS.navy);
@@ -288,11 +292,15 @@ export function drawStoqoBrandLogo(
     'F'
   );
 
-  const wordX = x + iconSize + (variant === 'full' ? 3 : 2.2);
-  const wordY = y + (variant === 'full' ? 6.4 : 4.2);
+  const wordGap = variant === 'full' ? 3 : variant === 'medium' ? 2.4 : variant === 'compact' ? 2.2 : 1.8;
+  const wordX = x + iconSize + wordGap;
+  const wordY =
+    y + (variant === 'full' ? 6.4 : variant === 'medium' ? 4.9 : variant === 'compact' ? 4.2 : 3.5);
 
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(variant === 'full' ? 16.5 : 10.5);
+  doc.setFontSize(
+    variant === 'full' ? 16.5 : variant === 'medium' ? 13.0 : variant === 'compact' ? 10.5 : 9.0
+  );
 
   doc.setTextColor(...STOQO_PDF_COLORS.navy);
   doc.text('STO', wordX, wordY);
@@ -304,12 +312,14 @@ export function drawStoqoBrandLogo(
   doc.text('O', wordX + stoW + qW, wordY);
 
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(variant === 'full' ? 7.5 : 6);
+  doc.setFontSize(
+    variant === 'full' ? 7.5 : variant === 'medium' ? 6.3 : variant === 'compact' ? 6 : 5.3
+  );
   doc.setTextColor(...STOQO_PDF_COLORS.orange);
   doc.text(
     'Smart Stock. Smarter Business.',
     wordX,
-    y + (variant === 'full' ? 10.6 : 6.7)
+    y + (variant === 'full' ? 10.6 : variant === 'medium' ? 8.1 : variant === 'compact' ? 6.7 : 5.4)
   );
 }
 
@@ -318,9 +328,97 @@ export function drawStoqoBrandLogo(
  */
 export function drawStoqoPageOneHeader(doc: jsPDF, options: PdfHeaderOptions): number {
   const pageWidth = doc.internal.pageSize.getWidth();
-  const marginX = A4_LAYOUT.marginX;
+  const isCompact = Boolean(options.compact);
+  const marginX = isCompact ? 8 : A4_LAYOUT.marginX;
   const contentWidth = pageWidth - marginX * 2;
   const generatedText = formatPdfDateTime(options.generatedAt || new Date(), options.timezone);
+
+  if (isCompact) {
+    // Space-efficient branded Page 1 Header (preserves STOQO branding, logo, title, restaurant, date/time)
+    doc.setFillColor(...STOQO_PDF_COLORS.navy);
+    doc.rect(0, 0, pageWidth, 2.4, 'F');
+    doc.setFillColor(...STOQO_PDF_COLORS.orange);
+    doc.rect(0, 2.4, pageWidth, 0.7, 'F');
+
+    const topY = 5.0;
+    drawStoqoBrandLogo(doc, marginX, topY, 'medium');
+
+    const rightColumnMaxWidth = Math.max(85, contentWidth - 58);
+    let titleFontSize = 11.4;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(titleFontSize);
+    while (titleFontSize > 8.6 && measurePdfTextWidth(doc, options.reportTitle, titleFontSize) > rightColumnMaxWidth) {
+      titleFontSize -= 0.35;
+      doc.setFontSize(titleFontSize);
+    }
+    drawPdfText(doc, options.reportTitle, pageWidth - marginX, topY + 3.6, {
+      align: 'right',
+      color: STOQO_PDF_COLORS.navy,
+    });
+
+    const restUpper = (options.restaurantName || 'Restaurant').toUpperCase();
+    let restFontSize = 8.4;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(restFontSize);
+    while (restFontSize > 6.8 && measurePdfTextWidth(doc, restUpper, restFontSize) > rightColumnMaxWidth) {
+      restFontSize -= 0.25;
+      doc.setFontSize(restFontSize);
+    }
+    drawPdfText(doc, restUpper, pageWidth - marginX, topY + 7.2, {
+      align: 'right',
+      color: STOQO_PDF_COLORS.slate900,
+    });
+
+    if (options.restaurantAddress) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(6.5);
+      const trimmedAddr = options.restaurantAddress.substring(0, 76);
+      drawPdfText(doc, trimmedAddr, pageWidth - marginX, topY + 10.1, {
+        align: 'right',
+        color: STOQO_PDF_COLORS.slate600,
+      });
+    }
+
+    const stripY = topY + (options.restaurantAddress ? 11.6 : 10.2);
+    const stripH = 5.6;
+
+    doc.setFillColor(...STOQO_PDF_COLORS.lightBg);
+    doc.setDrawColor(...STOQO_PDF_COLORS.border);
+    doc.setLineWidth(0.22);
+    doc.roundedRect(marginX, stripY, contentWidth, stripH, 1.2, 1.2, 'FD');
+
+    const rightMetaCombined = options.rightMetaLabel
+      ? `Generated: ${generatedText}  |  ${options.rightMetaLabel}`
+      : `Generated: ${generatedText}`;
+    let rightFontSize = 6.9;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(rightFontSize);
+    const rightMaxW = contentWidth * 0.44;
+    while (rightFontSize > 5.8 && measurePdfTextWidth(doc, rightMetaCombined, rightFontSize) > rightMaxW) {
+      rightFontSize -= 0.2;
+      doc.setFontSize(rightFontSize);
+    }
+    const rightMeasuredW = measurePdfTextWidth(doc, rightMetaCombined, rightFontSize);
+    drawPdfText(doc, rightMetaCombined, pageWidth - marginX - 2.6, stripY + 3.75, {
+      align: 'right',
+      color: STOQO_PDF_COLORS.slate700,
+    });
+
+    const leftMaxW = Math.max(60, contentWidth - rightMeasuredW - 8);
+    const periodLabel = `Reporting Period: ${options.dateRangeLabel || `As of ${generatedText}`}`;
+    let periodFontSize = 7.0;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(periodFontSize);
+    while (periodFontSize > 5.6 && measurePdfTextWidth(doc, periodLabel, periodFontSize) > leftMaxW) {
+      periodFontSize -= 0.2;
+      doc.setFontSize(periodFontSize);
+    }
+    drawPdfText(doc, periodLabel, marginX + 2.6, stripY + 3.75, {
+      color: STOQO_PDF_COLORS.navy,
+    });
+
+    return stripY + stripH + 2.2;
+  }
 
   // Top Brand Bar
   doc.setFillColor(...STOQO_PDF_COLORS.navy);
@@ -421,8 +519,61 @@ export function drawStoqoContinuationHeader(
   sectionContinuationLabel?: string
 ): number {
   const pageWidth = doc.internal.pageSize.getWidth();
-  const marginX = A4_LAYOUT.marginX;
+  const isCompact = Boolean(options.compact);
+  const marginX = isCompact ? 8 : A4_LAYOUT.marginX;
   const contentWidth = pageWidth - marginX * 2;
+
+  if (isCompact) {
+    doc.setFillColor(...STOQO_PDF_COLORS.navy);
+    doc.rect(0, 0, pageWidth, 1.8, 'F');
+    doc.setFillColor(...STOQO_PDF_COLORS.orange);
+    doc.rect(0, 1.8, pageWidth, 0.6, 'F');
+
+    drawStoqoBrandLogo(doc, marginX, 3.6, 'micro');
+
+    const contTitle = `${options.reportTitle}  |  ${(options.restaurantName || 'Restaurant').toUpperCase()}`;
+    const contMaxW = Math.max(90, contentWidth - 46);
+    let contTitleSize = 7.6;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(contTitleSize);
+    while (contTitleSize > 6.2 && measurePdfTextWidth(doc, contTitle, contTitleSize) > contMaxW) {
+      contTitleSize -= 0.25;
+      doc.setFontSize(contTitleSize);
+    }
+    drawPdfText(doc, contTitle, pageWidth - marginX, 6.5, {
+      align: 'right',
+      color: STOQO_PDF_COLORS.navy,
+    });
+
+    if (options.dateRangeLabel) {
+      let contDateSize = 6.2;
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(contDateSize);
+      while (contDateSize > 5.4 && measurePdfTextWidth(doc, options.dateRangeLabel, contDateSize) > contMaxW) {
+        contDateSize -= 0.2;
+        doc.setFontSize(contDateSize);
+      }
+      drawPdfText(doc, options.dateRangeLabel, pageWidth - marginX, 9.2, {
+        align: 'right',
+        color: STOQO_PDF_COLORS.slate600,
+      });
+    }
+
+    doc.setDrawColor(...STOQO_PDF_COLORS.border);
+    doc.setLineWidth(0.22);
+    doc.line(marginX, 10.6, pageWidth - marginX, 10.6);
+
+    let nextY = 12.0;
+    if (sectionContinuationLabel) {
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.6);
+      drawPdfText(doc, sectionContinuationLabel, marginX, nextY + 1.2, {
+        color: STOQO_PDF_COLORS.orange,
+      });
+      nextY += 3.5;
+    }
+    return nextY;
+  }
 
   doc.setFillColor(...STOQO_PDF_COLORS.navy);
   doc.rect(0, 0, pageWidth, 2.4, 'F');
@@ -481,17 +632,18 @@ export function drawStoqoContinuationHeader(
 export function drawPdfSummaryCards(
   doc: jsPDF,
   cards: PdfSummaryCard[],
-  startY: number
+  startY: number,
+  compact: boolean = false
 ): number {
   if (!cards.length) return startY;
   const pageWidth = doc.internal.pageSize.getWidth();
-  const marginX = A4_LAYOUT.marginX;
+  const marginX = compact ? 8 : A4_LAYOUT.marginX;
   const contentWidth = pageWidth - marginX * 2;
-  const gap = cards.length >= 5 ? 2.2 : 3;
+  const gap = compact ? 2.0 : cards.length >= 5 ? 2.2 : 3;
   const cardW = (contentWidth - gap * (cards.length - 1)) / cards.length;
-  const cardH = 14.5;
-  const padLeft = cards.length >= 5 ? 3.2 : 4.0;
-  const textMaxW = Math.max(20, cardW - padLeft - 1.8);
+  const cardH = compact ? 10.2 : 14.5;
+  const padLeft = compact ? 2.8 : cards.length >= 5 ? 3.2 : 4.0;
+  const textMaxW = Math.max(20, cardW - padLeft - 1.6);
 
   const accentMap: Record<NonNullable<PdfSummaryCard['accent']>, [number, number, number]> = {
     navy: STOQO_PDF_COLORS.navy,
@@ -507,36 +659,36 @@ export function drawPdfSummaryCards(
 
     doc.setFillColor(...STOQO_PDF_COLORS.white);
     doc.setDrawColor(...STOQO_PDF_COLORS.border);
-    doc.setLineWidth(0.25);
-    doc.roundedRect(cx, startY, cardW, cardH, 1.5, 1.5, 'FD');
+    doc.setLineWidth(0.22);
+    doc.roundedRect(cx, startY, cardW, cardH, compact ? 1.2 : 1.5, compact ? 1.2 : 1.5, 'FD');
 
     // Left color accent bar
     doc.setFillColor(...accent);
-    doc.rect(cx, startY, 1.6, cardH, 'F');
+    doc.rect(cx, startY, compact ? 1.4 : 1.6, cardH, 'F');
 
     // Auto-scale card label so narrow portrait 5-card rows never clip
     const labelText = card.label.toUpperCase();
-    let labelFontSize = cards.length >= 5 ? 6.0 : 6.6;
+    let labelFontSize = compact ? 5.6 : cards.length >= 5 ? 6.0 : 6.6;
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(labelFontSize);
-    while (labelFontSize > 4.9 && measurePdfTextWidth(doc, labelText, labelFontSize) > textMaxW) {
-      labelFontSize -= 0.25;
+    while (labelFontSize > 4.7 && measurePdfTextWidth(doc, labelText, labelFontSize) > textMaxW) {
+      labelFontSize -= 0.2;
       doc.setFontSize(labelFontSize);
     }
-    drawPdfText(doc, labelText, cx + padLeft, startY + 5.0, {
+    drawPdfText(doc, labelText, cx + padLeft, startY + (compact ? 3.8 : 5.0), {
       color: STOQO_PDF_COLORS.slate600,
     });
 
     // Shrink value font smoothly if long Indian currency strings appear in portrait cards
-    let valueFontSize = cards.length >= 5 ? 9.8 : 11.2;
+    let valueFontSize = compact ? 9.2 : cards.length >= 5 ? 9.8 : 11.2;
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(valueFontSize);
-    while (valueFontSize > 6.8 && measurePdfTextWidth(doc, card.value, valueFontSize) > textMaxW) {
-      valueFontSize -= 0.4;
+    while (valueFontSize > 6.4 && measurePdfTextWidth(doc, card.value, valueFontSize) > textMaxW) {
+      valueFontSize -= 0.35;
       doc.setFontSize(valueFontSize);
     }
 
-    drawPdfText(doc, card.value, cx + padLeft, startY + 11.5, {
+    drawPdfText(doc, card.value, cx + padLeft, startY + (compact ? 8.4 : 11.5), {
       color:
         card.accent === 'red' || card.accent === 'orange' || card.accent === 'green'
           ? accent
@@ -544,7 +696,7 @@ export function drawPdfSummaryCards(
     });
   });
 
-  return startY + cardH + 4.5;
+  return startY + cardH + (compact ? 2.4 : 4.5);
 }
 
 /**
@@ -637,13 +789,14 @@ export function renderA4Table(doc: jsPDF, options: PdfTableRenderOptions): numbe
     headerOptions,
     emptyMessage = 'No records available for this report.',
     highlightStatusRows = false,
+    compact = Boolean(options.headerOptions?.compact),
   } = options;
 
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
-  const marginX = A4_LAYOUT.marginX;
+  const marginX = compact ? 8 : A4_LAYOUT.marginX;
   const contentWidth = pageWidth - marginX * 2;
-  const usableBottomY = pageHeight - A4_LAYOUT.footerReservedHeight;
+  const usableBottomY = pageHeight - (compact ? 10.0 : A4_LAYOUT.footerReservedHeight);
 
   const totalWeight = columns.reduce((sum, col) => sum + (col.weight ?? 1), 0);
   const colWidths = columns.map((col) => ((col.weight ?? 1) / totalWeight) * contentWidth);
@@ -654,13 +807,32 @@ export function renderA4Table(doc: jsPDF, options: PdfTableRenderOptions): numbe
     accX += w;
   }
 
-  // Portrait-tuned compact yet crisp typography & horizontal padding
-  const fontSize = columns.length >= 9 ? 6.7 : columns.length >= 7 ? 7.2 : 8.0;
-  const headerFontSize = columns.length >= 9 ? 6.4 : columns.length >= 7 ? 6.9 : 7.6;
-  const lineHeight = fontSize * 0.44 + 0.5;
-  const headerLineHeight = headerFontSize * 0.44 + 0.55;
-  const cellPadX = columns.length >= 9 ? 1.2 : columns.length >= 7 ? 1.5 : 2.0;
-  const cellPadY = columns.length >= 9 ? 1.5 : 1.75;
+  // Portrait-tuned compact yet crisp typography & horizontal/vertical padding
+  const fontSize = compact
+    ? 7.3
+    : columns.length >= 9
+    ? 6.7
+    : columns.length >= 7
+    ? 7.2
+    : 8.0;
+  const headerFontSize = compact
+    ? 6.8
+    : columns.length >= 9
+    ? 6.4
+    : columns.length >= 7
+    ? 6.9
+    : 7.6;
+  const lineHeight = compact ? 2.95 : fontSize * 0.44 + 0.5;
+  const headerLineHeight = compact ? 2.75 : headerFontSize * 0.44 + 0.55;
+  const cellPadX = compact
+    ? 0.9
+    : columns.length >= 9
+    ? 1.2
+    : columns.length >= 7
+    ? 1.5
+    : 2.0;
+  const cellPadY = compact ? 0.75 : columns.length >= 9 ? 1.5 : 1.75;
+  const minRowHeight = compact ? 4.6 : 6.4;
 
   // Pre-wrap column headers cleanly (supports explicit \n and automatic 2-line wrapping in Portrait)
   doc.setFont('helvetica', 'bold');
@@ -676,7 +848,9 @@ export function renderA4Table(doc: jsPDF, options: PdfTableRenderOptions): numbe
     return out.length > 0 ? out : [col.header];
   });
   const maxHeaderLines = Math.max(1, ...wrappedHeaders.map((lines) => lines.length));
-  const headerHeight = Math.max(7.6, maxHeaderLines * headerLineHeight + 3.0);
+  const headerHeight = compact
+    ? Math.max(6.2, maxHeaderLines * headerLineHeight + 1.8)
+    : Math.max(7.6, maxHeaderLines * headerLineHeight + 3.0);
 
   const drawHeaderBar = (y: number): number => {
     doc.setFillColor(...STOQO_PDF_COLORS.navy);
@@ -702,8 +876,9 @@ export function renderA4Table(doc: jsPDF, options: PdfTableRenderOptions): numbe
           ? colX + colW / 2
           : colX + cellPadX;
 
-      const blockH = lines.length * headerLineHeight;
-      const firstBaselineY = y + (headerHeight - blockH) / 2 + headerFontSize * 0.352778 * 0.85;
+      const capH = headerFontSize * 0.352778 * 0.72;
+      const blockH = (lines.length - 1) * headerLineHeight + capH;
+      const firstBaselineY = y + (headerHeight - blockH) / 2 + capH;
 
       lines.forEach((line, lineIdx) => {
         let lineFontSize = headerFontSize;
@@ -723,7 +898,7 @@ export function renderA4Table(doc: jsPDF, options: PdfTableRenderOptions): numbe
   };
 
   let cursorY = options.startY;
-  if (cursorY + headerHeight + 10 > usableBottomY) {
+  if (cursorY + headerHeight + minRowHeight > usableBottomY) {
     doc.addPage('a4', 'portrait');
     cursorY = drawStoqoContinuationHeader(doc, headerOptions);
   }
@@ -755,25 +930,36 @@ export function renderA4Table(doc: jsPDF, options: PdfTableRenderOptions): numbe
         return [rawText];
       }
       doc.setFont('helvetica', col.isBold ? 'bold' : 'normal');
-      const maxWidth = Math.max(6, colWidths[colIdx] - cellPadX * 2);
+      const maxWidth = Math.max(5.5, colWidths[colIdx] - cellPadX * 2);
 
       // Keep compact single-line numeric / currency tokens intact (auto-scaled if tight) instead of ugly mid-number wraps
       if (
         col.align === 'right' &&
         !rawText.includes('\n') &&
         rawText.length <= 20 &&
-        measurePdfTextWidth(doc, rawText, Math.max(5.6, fontSize - 1.0)) <= maxWidth
+        measurePdfTextWidth(doc, rawText, Math.max(5.6, fontSize - 1.2)) <= maxWidth
       ) {
         return [rawText || '—'];
       }
 
-      const adjustedMax = rawText.includes('₹') ? Math.max(6, maxWidth - 1.5) : maxWidth;
+      // In compact mode, keep near-fit single-line labels (Item Name, Category, Department) on 1 line via slight font scale
+      if (compact && !rawText.includes('\n')) {
+        const minSingleLinePt = Math.max(5.9, fontSize - 1.3);
+        doc.setFontSize(minSingleLinePt);
+        const fitsSingleLine = measurePdfTextWidth(doc, rawText || '—', minSingleLinePt) <= maxWidth;
+        doc.setFontSize(fontSize);
+        if (fitsSingleLine) {
+          return [rawText || '—'];
+        }
+      }
+
+      const adjustedMax = rawText.includes('₹') ? Math.max(5.5, maxWidth - 1.2) : maxWidth;
       const split = doc.splitTextToSize(rawText || '—', adjustedMax) as string[];
       return split.length > 0 ? split : ['—'];
     });
 
     const maxLines = Math.max(1, ...wrappedCells.map((lines) => lines.length));
-    const rowHeight = Math.max(6.4, maxLines * lineHeight + cellPadY * 2);
+    const rowHeight = Math.max(minRowHeight, maxLines * lineHeight + cellPadY * 2);
 
     // Page break cleanly BEFORE drawing the row and repeat column headers
     if (cursorY + rowHeight > usableBottomY) {
@@ -803,7 +989,7 @@ export function renderA4Table(doc: jsPDF, options: PdfTableRenderOptions): numbe
 
     // Row horizontal & subtle outer vertical borders
     doc.setDrawColor(...STOQO_PDF_COLORS.rowBorder);
-    doc.setLineWidth(0.18);
+    doc.setLineWidth(compact ? 0.14 : 0.18);
     doc.line(marginX, cursorY + rowHeight, marginX + contentWidth, cursorY + rowHeight);
     doc.line(marginX, cursorY, marginX, cursorY + rowHeight);
     doc.line(marginX + contentWidth, cursorY, marginX + contentWidth, cursorY + rowHeight);
@@ -814,22 +1000,22 @@ export function renderA4Table(doc: jsPDF, options: PdfTableRenderOptions): numbe
       const colW = colWidths[colIdx];
       const align = col.align || 'left';
       const cellValue = sanitizePdfText(row[colIdx]);
-      const maxCellW = Math.max(5.5, colW - cellPadX * 2);
+      const maxCellW = Math.max(5.0, colW - cellPadX * 2);
 
       if (col.isStatusBadge) {
         const badge = resolvePdfStatusBadge(cellValue);
         if (badge) {
-          const maxPillW = Math.max(11, colW - 1.4);
-          let badgeFontSize = columns.length >= 9 ? 5.6 : 6.2;
+          const maxPillW = Math.max(11, colW - (compact ? 1.2 : 1.4));
+          let badgeFontSize = compact ? 5.4 : columns.length >= 9 ? 5.6 : 6.2;
           doc.setFont('helvetica', 'bold');
           doc.setFontSize(badgeFontSize);
-          while (badgeFontSize > 4.6 && doc.getTextWidth(badge.label) + 2.4 > maxPillW) {
+          while (badgeFontSize > 4.5 && doc.getTextWidth(badge.label) + (compact ? 2.0 : 2.4) > maxPillW) {
             badgeFontSize -= 0.2;
             doc.setFontSize(badgeFontSize);
           }
           const textW = doc.getTextWidth(badge.label);
-          const pillW = Math.min(maxPillW, Math.max(textW + 3.0, Math.min(14, maxPillW)));
-          const pillH = 4.3;
+          const pillW = Math.min(maxPillW, Math.max(textW + (compact ? 2.4 : 3.0), Math.min(13.5, maxPillW)));
+          const pillH = compact ? 3.35 : 4.3;
           const pillX =
             align === 'right'
               ? colX + colW - cellPadX - pillW
@@ -840,10 +1026,12 @@ export function renderA4Table(doc: jsPDF, options: PdfTableRenderOptions): numbe
 
           doc.setFillColor(...badge.fill);
           doc.setDrawColor(...badge.border);
-          doc.setLineWidth(0.24);
-          doc.roundedRect(pillX, pillY, pillW, pillH, 1.0, 1.0, 'FD');
+          doc.setLineWidth(compact ? 0.2 : 0.24);
+          doc.roundedRect(pillX, pillY, pillW, pillH, compact ? 0.85 : 1.0, compact ? 0.85 : 1.0, 'FD');
 
-          drawPdfText(doc, badge.label, pillX + pillW / 2, pillY + 3.0, {
+          const badgeCapH = badgeFontSize * 0.352778 * 0.72;
+          const badgeBaselineY = compact ? pillY + pillH / 2 + badgeCapH / 2 : pillY + 3.0;
+          drawPdfText(doc, badge.label, pillX + pillW / 2, badgeBaselineY, {
             align: 'center',
             color: badge.text,
           });
@@ -855,9 +1043,10 @@ export function renderA4Table(doc: jsPDF, options: PdfTableRenderOptions): numbe
       doc.setFont('helvetica', col.isBold ? 'bold' : 'normal');
       doc.setFontSize(fontSize);
 
-      const textBlockHeight = lines.length * lineHeight;
-      const firstLineBaselineY =
-        cursorY + (rowHeight - textBlockHeight) / 2 + fontSize * 0.352778 * 0.85;
+      const capH = fontSize * 0.352778 * 0.72;
+      const firstLineBaselineY = compact
+        ? cursorY + (rowHeight - ((lines.length - 1) * lineHeight + capH)) / 2 + capH
+        : cursorY + (rowHeight - lines.length * lineHeight) / 2 + fontSize * 0.352778 * 0.85;
 
       const tx =
         align === 'right'
@@ -870,7 +1059,7 @@ export function renderA4Table(doc: jsPDF, options: PdfTableRenderOptions): numbe
         let cellLineFontSize = fontSize;
         doc.setFontSize(cellLineFontSize);
         while (cellLineFontSize > 5.4 && measurePdfTextWidth(doc, line, cellLineFontSize) > maxCellW) {
-          cellLineFontSize -= 0.25;
+          cellLineFontSize -= 0.2;
           doc.setFontSize(cellLineFontSize);
         }
         drawPdfText(doc, line, tx, firstLineBaselineY + lineIdx * lineHeight, {
@@ -885,7 +1074,7 @@ export function renderA4Table(doc: jsPDF, options: PdfTableRenderOptions): numbe
 
   // Optional Totals Row (overflow-safe across narrow portrait columns)
   if (totalsRow && totalsRow.length > 0) {
-    const totalsHeight = 8;
+    const totalsHeight = compact ? 6.2 : 8;
     if (cursorY + totalsHeight > usableBottomY) {
       doc.addPage('a4', 'portrait');
       cursorY = drawStoqoContinuationHeader(doc, headerOptions);
@@ -894,11 +1083,11 @@ export function renderA4Table(doc: jsPDF, options: PdfTableRenderOptions): numbe
 
     doc.setFillColor(241, 245, 249);
     doc.setDrawColor(...STOQO_PDF_COLORS.navy);
-    doc.setLineWidth(0.3);
+    doc.setLineWidth(0.28);
     doc.rect(marginX, cursorY, contentWidth, totalsHeight, 'FD');
 
     doc.setFont('helvetica', 'bold');
-    const baseTotalFontSize = Math.min(8.2, fontSize + 0.3);
+    const baseTotalFontSize = compact ? 7.5 : Math.min(8.2, fontSize + 0.3);
     columns.forEach((col, colIdx) => {
       const val = sanitizePdfText(totalsRow[colIdx] ?? '');
       if (!val) return;
@@ -933,7 +1122,9 @@ export function renderA4Table(doc: jsPDF, options: PdfTableRenderOptions): numbe
         doc.setFontSize(cellFontSize);
       }
 
-      drawPdfText(doc, val, tx, cursorY + 5.1, {
+      const capH = cellFontSize * 0.352778 * 0.72;
+      const totalBaselineY = compact ? cursorY + totalsHeight / 2 + capH / 2 : cursorY + 5.1;
+      drawPdfText(doc, val, tx, totalBaselineY, {
         align,
         color: STOQO_PDF_COLORS.navy,
       });
@@ -942,7 +1133,7 @@ export function renderA4Table(doc: jsPDF, options: PdfTableRenderOptions): numbe
     cursorY += totalsHeight;
   }
 
-  return cursorY + 4;
+  return cursorY + (compact ? 2.5 : 4);
 }
 
 /**
@@ -953,23 +1144,25 @@ export function applyStoqoPageFooters(doc: jsPDF, options: PdfHeaderOptions): vo
   const totalPages = doc.getNumberOfPages();
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
-  const marginX = A4_LAYOUT.marginX;
+  const isCompact = Boolean(options.compact);
+  const marginX = isCompact ? 8 : A4_LAYOUT.marginX;
   const contentWidth = pageWidth - marginX * 2;
   const generatedText = formatPdfDateTime(options.generatedAt || new Date(), options.timezone);
 
   for (let p = 1; p <= totalPages; p++) {
     doc.setPage(p);
-    const ruleY = pageHeight - 10.8;
-    const textY = pageHeight - 6.8;
+    const ruleY = pageHeight - (isCompact ? 8.0 : 10.8);
+    const textY = pageHeight - (isCompact ? 4.8 : 6.8);
+    const baseFooterFont = isCompact ? 6.5 : 7.0;
 
     doc.setDrawColor(...STOQO_PDF_COLORS.border);
-    doc.setLineWidth(0.25);
+    doc.setLineWidth(0.22);
     doc.line(marginX, ruleY, pageWidth - marginX, ruleY);
 
     const rightFooter = `Generated: ${generatedText}  |  Page ${p} of ${totalPages}`;
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(7.0);
-    const rightFooterW = measurePdfTextWidth(doc, rightFooter, 7.0);
+    doc.setFontSize(baseFooterFont);
+    const rightFooterW = measurePdfTextWidth(doc, rightFooter, baseFooterFont);
     drawPdfText(doc, rightFooter, pageWidth - marginX, textY, {
       align: 'right',
       color: STOQO_PDF_COLORS.slate600,
@@ -979,10 +1172,10 @@ export function applyStoqoPageFooters(doc: jsPDF, options: PdfHeaderOptions): vo
     const leftFooter = options.restaurantName
       ? `STOQO – Smart Stock. Smarter Business.  |  ${options.restaurantName}`
       : 'STOQO – Smart Stock. Smarter Business.';
-    let leftSize = 7.0;
+    let leftSize = baseFooterFont;
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(leftSize);
-    while (leftSize > 5.6 && measurePdfTextWidth(doc, leftFooter, leftSize) > leftMaxW) {
+    while (leftSize > 5.4 && measurePdfTextWidth(doc, leftFooter, leftSize) > leftMaxW) {
       leftSize -= 0.25;
       doc.setFontSize(leftSize);
     }

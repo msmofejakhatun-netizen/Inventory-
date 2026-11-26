@@ -271,6 +271,7 @@ export function buildCurrentStockInventoryPdf(options: CurrentStockPdfOptions): 
     generatedAt,
     timezone,
     rightMetaLabel: `Items Listed: ${enriched.length}`,
+    compact: true,
   };
 
   let cursorY = drawStoqoPageOneHeader(doc, headerOptions);
@@ -287,20 +288,21 @@ export function buildCurrentStockInventoryPdf(options: CurrentStockPdfOptions): 
     { label: 'In Stock Items', value: String(inStockCount), accent: 'green' },
   ];
 
-  cursorY = drawPdfSummaryCards(doc, summaryCards, cursorY);
+  cursorY = drawPdfSummaryCards(doc, summaryCards, cursorY, true);
 
-  // Portrait-optimized 10-column layout across 190mm printable width (preserves ALL columns & Low Stock badges)
+  // Compact A4 Portrait 10-column layout across 194mm printable width (weights sum to 194mm).
+  // Allocates generous width to Item Name, Category & Department so rows stay on 1 compact line while preserving ALL columns.
   const columns: PdfTableColumn[] = [
-    { header: '#', weight: 0.42, align: 'center' },
-    { header: 'Item Name', weight: 2.45, align: 'left', isBold: true },
-    { header: 'Category', weight: 1.15, align: 'left' },
-    { header: 'Department', weight: 1.15, align: 'left' },
-    { header: 'Current\nStock', weight: 1.15, align: 'right', isBold: true },
-    { header: 'Min /\nReorder', weight: 1.1, align: 'right' },
-    { header: 'Avg Rate\n(WAC)', weight: 1.15, align: 'right' },
-    { header: 'Stock\nValue', weight: 1.3, align: 'right', isBold: true },
-    { header: 'Days\nStock', weight: 0.78, align: 'right' },
-    { header: 'Stock\nStatus', weight: 1.35, align: 'center', isStatusBadge: true },
+    { header: '#', weight: 6.5, align: 'center' },
+    { header: 'Item Name', weight: 44.0, align: 'left', isBold: true },
+    { header: 'Category', weight: 27.0, align: 'left' },
+    { header: 'Department', weight: 21.5, align: 'left' },
+    { header: 'Current\nStock', weight: 14.5, align: 'right', isBold: true },
+    { header: 'Min /\nReorder', weight: 13.5, align: 'right' },
+    { header: 'Avg Rate\n(WAC)', weight: 16.0, align: 'right' },
+    { header: 'Stock\nValue', weight: 19.5, align: 'right', isBold: true },
+    { header: 'Days\nStock', weight: 11.0, align: 'right' },
+    { header: 'Stock\nStatus', weight: 20.5, align: 'center', isStatusBadge: true },
   ];
 
   const rows: (string | number)[][] = enriched.map((entry, idx) => {
@@ -352,6 +354,7 @@ export function buildCurrentStockInventoryPdf(options: CurrentStockPdfOptions): 
     headerOptions,
     emptyMessage: 'No inventory items match the selected filters.',
     highlightStatusRows: true,
+    compact: true,
   });
 
   applyStoqoPageFooters(doc, headerOptions);
