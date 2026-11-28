@@ -287,6 +287,32 @@
       },
       "required": ["lastNumber", "restaurantId"]
     },
+    "IssueSessionDraft": {
+      "title": "IssueSessionDraft",
+      "description": "Tenant-isolated and user-owned auto-saved unfinished Store to Kitchen Issue Stock draft. Never represents a confirmed stock deduction.",
+      "type": "object",
+      "properties": {
+        "draftId": { "type": "string", "maxLength": 128 },
+        "draftSessionId": { "type": "string", "maxLength": 80 },
+        "restaurantId": { "type": "string", "maxLength": 128 },
+        "actorUid": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["DRAFT"] },
+        "departmentId": { "type": "string", "maxLength": 128 },
+        "shift": { "type": "string", "enum": ["MORNING", "EVENING", "NIGHT", "GENERAL"] },
+        "issueDate": { "type": "string", "maxLength": 20 },
+        "selectedReceiverUid": { "type": "string", "maxLength": 128 },
+        "receivedByName": { "type": "string", "maxLength": 100 },
+        "searchQuery": { "type": "string", "maxLength": 150 },
+        "selectedItemId": { "type": "string", "maxLength": 128 },
+        "quantityInput": { "type": "string", "maxLength": 24 },
+        "cartItems": { "type": "array" },
+        "includeManagerSignature": { "type": "boolean" },
+        "managerSignatureDataUrl": { "type": "string", "maxLength": 130000 },
+        "updatedAt": { "type": "number" },
+        "updatedAtIso": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["draftId", "draftSessionId", "restaurantId", "actorUid", "status", "departmentId", "shift", "issueDate", "receivedByName", "cartItems", "includeManagerSignature", "updatedAt", "updatedAtIso"]
+    },
     "EmergencyIssue": {
       "title": "EmergencyIssue",
       "description": "Mid-service emergency requisition by kitchen department",
@@ -584,6 +610,10 @@
     "/restaurants/{restaurantId}/issueCounters/{counterId}": {
       "schema": "IssueCounter",
       "description": "Sequential Issue ID counter per restaurant"
+    },
+    "/restaurants/{restaurantId}/issueDrafts/{draftId}": {
+      "schema": "IssueSessionDraft",
+      "description": "User-scoped auto-saved unfinished Store to Kitchen Issue Stock drafts (tenant isolated, never deducts stock)"
     },
     "/restaurants/{restaurantId}/emergencyIssues/{issueId}": {
       "schema": "EmergencyIssue",

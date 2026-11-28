@@ -5,6 +5,7 @@ import { Modal } from '../common/Modal';
 interface SignatureCanvasProps {
   id?: string;
   height?: number;
+  initialDataUrl?: string | null;
   onChange: (dataUrl: string | null) => void;
   disabled?: boolean;
 }
@@ -16,13 +17,15 @@ interface SignatureCanvasProps {
 export const SignatureCanvas: React.FC<SignatureCanvasProps> = ({
   id = 'signature-canvas',
   height = 150,
+  initialDataUrl = null,
   onChange,
   disabled = false,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const isDrawingRef = useRef(false);
-  const hasInkRef = useRef(false);
-  const [hasInk, setHasInk] = useState(false);
+  const hasInkRef = useRef(Boolean(initialDataUrl));
+  const [hasInk, setHasInk] = useState(Boolean(initialDataUrl));
+  const lastRestoredUrlRef = useRef<string | null>(null);
 
   const initializeCanvas = () => {
     const canvas = canvasRef.current;
@@ -46,7 +49,54 @@ export const SignatureCanvas: React.FC<SignatureCanvasProps> = ({
 
   useEffect(() => {
     initializeCanvas();
+    if (initialDataUrl && initialDataUrl.startsWith('data:image/png;base64,')) {
+      const canvas = canvasRef.current;
+      const ctx = canvas?.getContext('2d');
+      if (canvas && ctx) {
+        const img = new Image();
+        img.onload = () => {
+          const rect = canvas.getBoundingClientRect();
+          const width = Math.max(280, Math.floor(rect.width || 420));
+          ctx.drawImage(img, 0, 0, width, height);
+          hasInkRef.current = true;
+          setHasInk(true);
+          lastRestoredUrlRef.current = initialDataUrl;
+        };
+        img.src = initialDataUrl;
+      }
+    }
   }, [height]);
+
+  useEffect(() => {
+    if (
+      initialDataUrl &&
+      initialDataUrl !== lastRestoredUrlRef.current &&
+      !isDrawingRef.current &&
+      initialDataUrl.startsWith('data:image/png;base64,')
+    ) {
+      const canvas = canvasRef.current;
+      const ctx = canvas?.getContext('2d');
+      if (canvas && ctx) {
+        const img = new Image();
+        img.onload = () => {
+          const rect = canvas.getBoundingClientRect();
+          const width = Math.max(280, Math.floor(rect.width || 420));
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(0, 0, width, height);
+          ctx.drawImage(img, 0, 0, width, height);
+          hasInkRef.current = true;
+          setHasInk(true);
+          lastRestoredUrlRef.current = initialDataUrl;
+        };
+        img.src = initialDataUrl;
+      }
+    } else if (!initialDataUrl && lastRestoredUrlRef.current && !isDrawingRef.current) {
+      lastRestoredUrlRef.current = null;
+      hasInkRef.current = false;
+      setHasInk(false);
+      initializeCanvas();
+    }
+  }, [initialDataUrl, height]);
 
   const getPoint = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;

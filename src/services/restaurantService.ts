@@ -581,6 +581,7 @@ export interface MultiItemIssueSessionInput {
   timezone?: string;
   items: MultiItemIssueSessionLineInput[];
   managerSignatureDataUrl?: string | null;
+  draftSessionId?: string;
 }
 
 export interface MultiItemIssueSessionResult {
@@ -664,7 +665,15 @@ export async function executeMultiItemIssueSessionTransaction(
     };
   }
 
-  const sessionRef = doc(getTenantCol(restaurantId, 'issueSessions'));
+  const safeDraftSessionId =
+    typeof input.draftSessionId === 'string' &&
+    /^[a-zA-Z0-9_-]{6,80}$/.test(input.draftSessionId.trim())
+      ? input.draftSessionId.trim()
+      : null;
+
+  const sessionRef = safeDraftSessionId
+    ? getTenantDoc(restaurantId, 'issueSessions', safeDraftSessionId)
+    : doc(getTenantCol(restaurantId, 'issueSessions'));
   const sessionId = sessionRef.id;
   const counterRef = getTenantDoc(restaurantId, 'issueCounters', 'default');
   const nowDate = new Date();
@@ -681,8 +690,8 @@ export async function executeMultiItemIssueSessionTransaction(
     throw new Error(dateValidation.error || 'Please select a valid Issue Date.');
   }
 
-  const issueDate = dateValidation.normalizedDateKey;
-  const isBackdated = dateValidation.isBackdated;
+  let issueDate = dateValidation.normalizedDateKey;
+  let isBackdated = dateValidation.isBackdated;
   const issueTime = getLocalTimeString(nowDate, timezone);
 
   class IssueSessionValidationError extends Error {
@@ -694,10 +703,28 @@ export async function executeMultiItemIssueSessionTransaction(
 
   let finalIssueNumber = '';
   let finalTotalValue = 0;
+  let finalTotalItems = input.items.length;
+  let finalCreatedAt = now;
 
   try {
     await runTransaction(db, async (transaction) => {
       // Phase 1: All Firestore reads BEFORE any write
+      // Idempotency guard: if this exact draftSessionId was already confirmed in a prior attempt,
+      // return the already-confirmed session cleanly WITHOUT deducting stock a second time.
+      if (safeDraftSessionId) {
+        const existingSessionSnap = await transaction.get(sessionRef);
+        if (existingSessionSnap.exists()) {
+          const existing = existingSessionSnap.data() as import('../types').IssueSession;
+          finalIssueNumber = existing.issueNumber;
+          finalTotalValue = Number(existing.totalValue || 0);
+          finalTotalItems = Number(existing.totalItems || existing.items?.length || input.items.length);
+          finalCreatedAt = existing.createdAt || now;
+          issueDate = existing.issueDate || issueDate;
+          isBackdated = Boolean(existing.isBackdated);
+          return;
+        }
+      }
+
       const counterSnap = await transaction.get(counterRef);
       const itemRefs = input.items.map((line) => getTenantDoc(restaurantId, 'items', line.itemId));
       const itemSnaps = await Promise.all(itemRefs.map((ref) => transaction.get(ref)));
@@ -896,8 +923,8 @@ export async function executeMultiItemIssueSessionTransaction(
       issueNumber: finalIssueNumber,
       issueDate,
       isBackdated,
-      createdAt: now,
-      totalItems: input.items.length,
+      createdAt: finalCreatedAt,
+      totalItems: finalTotalItems,
       totalValue: finalTotalValue,
     };
   } catch (err) {

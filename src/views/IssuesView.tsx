@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   Calendar,
@@ -8,8 +8,10 @@ import {
   Download,
   Eye,
   FileDown,
+  History,
   PenTool,
   Plus,
+  RotateCcw,
   Search,
   X,
 } from 'lucide-react';
@@ -21,6 +23,14 @@ import {
   MultiItemIssueSessionResult,
   saveIssueSessionSignature,
 } from '../services/restaurantService';
+import {
+  IssueSessionDraft,
+  clearIssueDraft,
+  isDraftMeaningful,
+  loadBestIssueDraft,
+  markIssueWorkspaceOpen,
+  wasIssueWorkspaceOpen,
+} from '../services/issueDraftService';
 import { exportToCsv } from '../services/exportService';
 import { downloadStoreToKitchenIssuePdf } from '../services/issuePdfService';
 import { Badge } from '../components/common/Badge';
@@ -77,6 +87,9 @@ export const IssuesView: React.FC = () => {
 
   // Modals & Active Selections
   const [isNewSessionModalOpen, setIsNewSessionModalOpen] = useState(false);
+  const [savedDraft, setSavedDraft] = useState<IssueSessionDraft | null>(null);
+  const [confirmClearDraftBanner, setConfirmClearDraftBanner] = useState(false);
+  const [clearingDraft, setClearingDraft] = useState(false);
   const [viewingSessionId, setViewingSessionId] = useState<string | null>(null);
   const [signingTarget, setSigningTarget] = useState<{
     session: IssueSession;
@@ -97,7 +110,41 @@ export const IssuesView: React.FC = () => {
     setViewingSessionId(null);
     setSigningTarget(null);
     setFeedbackNotice(null);
+    setSavedDraft(null);
+    setConfirmClearDraftBanner(false);
   }, [activeRestaurantId, activeRestaurant?.timezone]);
+
+  // Load any saved unfinished Issue Stock draft for this (restaurant, user) & auto-reopen after refresh
+  useEffect(() => {
+    if (!activeRestaurantId || !user?.uid || !canCreateIssueSession) {
+      setSavedDraft(null);
+      return;
+    }
+
+    let cancelled = false;
+    const checkSavedDraft = async () => {
+      try {
+        const draft = await loadBestIssueDraft(activeRestaurantId, user.uid);
+        if (cancelled) return;
+        const todayKey = getLocalDateKey(new Date(), restaurantTimeZone);
+        if (draft && isDraftMeaningful(draft, todayKey)) {
+          setSavedDraft(draft);
+          if (wasIssueWorkspaceOpen(activeRestaurantId, user.uid)) {
+            setIsNewSessionModalOpen(true);
+          }
+        } else {
+          setSavedDraft(null);
+        }
+      } catch {
+        if (!cancelled) setSavedDraft(null);
+      }
+    };
+
+    void checkSavedDraft();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeRestaurantId, user?.uid, canCreateIssueSession, restaurantTimeZone]);
 
   // Real-time Firestore listeners (tenant isolated)
   useEffect(() => {
@@ -228,42 +275,71 @@ export const IssuesView: React.FC = () => {
     return { totalSessions, totalItemsIssued, totalValue, pendingSignatures };
   }, [visibleSessions]);
 
-  const showNotice = (variant: 'success' | 'error', message: string) => {
+  const showNotice = useCallback((variant: 'success' | 'error', message: string) => {
     setFeedbackNotice({ variant, message });
     window.setTimeout(() => {
       setFeedbackNotice((prev) => (prev?.message === message ? null : prev));
     }, 6500);
-  };
+  }, []);
 
-  const handleSessionCreated = (result: MultiItemIssueSessionResult) => {
-    const formattedDate = formatDateKeyReadable(result.issueDate);
-    showNotice(
-      'success',
-      `Issue #${result.issueNumber} confirmed for ${formattedDate}${
-        result.isBackdated ? ' (Backdated Entry)' : ''
-      }! ${result.totalItems} ${
-        result.totalItems === 1 ? 'item' : 'items'
-      } deducted atomically (${currencySymbol}${result.totalValue.toFixed(2)}).`
-    );
+  const handleOpenIssueWorkspace = useCallback(() => {
+    markIssueWorkspaceOpen(activeRestaurantId, user?.uid || null, true);
+    setConfirmClearDraftBanner(false);
+    setIsNewSessionModalOpen(true);
+  }, [activeRestaurantId, user?.uid]);
 
-    // If the confirmed Issue Date falls outside the active date filter, automatically focus that Issue Date
-    const isInsideCurrentRange =
-      result.issueDate >= activeDateRange.startDateKey &&
-      result.issueDate <= activeDateRange.endDateKey;
-    if (!isInsideCurrentRange) {
-      const todayKey = getLocalDateKey(new Date(), restaurantTimeZone);
-      const yesterdayKey = shiftDateKey(todayKey, -1);
-      if (result.issueDate === todayKey) {
-        setDatePreset('TODAY');
-      } else if (result.issueDate === yesterdayKey) {
-        setDatePreset('YESTERDAY');
-      } else {
-        setCustomStartDate(result.issueDate);
-        setCustomEndDate(result.issueDate);
-        setDatePreset('CUSTOM');
-      }
+  const handleCloseIssueWorkspace = useCallback(() => {
+    setIsNewSessionModalOpen(false);
+  }, []);
+
+  const handleDiscardSavedDraft = async () => {
+    if (!activeRestaurantId || !user?.uid || clearingDraft) return;
+    setClearingDraft(true);
+    try {
+      await clearIssueDraft(activeRestaurantId, user.uid);
+      markIssueWorkspaceOpen(activeRestaurantId, user.uid, false);
+      setSavedDraft(null);
+      setConfirmClearDraftBanner(false);
+      showNotice('success', 'Unfinished Issue Stock draft cleared. Inventory stock was not affected.');
+    } finally {
+      setClearingDraft(false);
     }
   };
+
+  const handleSessionCreated = useCallback(
+    (result: MultiItemIssueSessionResult) => {
+      setSavedDraft(null);
+      setConfirmClearDraftBanner(false);
+      const formattedDate = formatDateKeyReadable(result.issueDate);
+      showNotice(
+        'success',
+        `Issue #${result.issueNumber} confirmed for ${formattedDate}${
+          result.isBackdated ? ' (Backdated Entry)' : ''
+        }! ${result.totalItems} ${
+          result.totalItems === 1 ? 'item' : 'items'
+        } deducted atomically (${currencySymbol}${result.totalValue.toFixed(2)}).`
+      );
+
+      // If the confirmed Issue Date falls outside the active date filter, automatically focus that Issue Date
+      const isInsideCurrentRange =
+        result.issueDate >= activeDateRange.startDateKey &&
+        result.issueDate <= activeDateRange.endDateKey;
+      if (!isInsideCurrentRange) {
+        const todayKey = getLocalDateKey(new Date(), restaurantTimeZone);
+        const yesterdayKey = shiftDateKey(todayKey, -1);
+        if (result.issueDate === todayKey) {
+          setDatePreset('TODAY');
+        } else if (result.issueDate === yesterdayKey) {
+          setDatePreset('YESTERDAY');
+        } else {
+          setCustomStartDate(result.issueDate);
+          setCustomEndDate(result.issueDate);
+          setDatePreset('CUSTOM');
+        }
+      }
+    },
+    [activeDateRange.endDateKey, activeDateRange.startDateKey, currencySymbol, restaurantTimeZone, showNotice]
+  );
 
   const handleSaveSignature = async (signatureDataUrl: string) => {
     if (!activeRestaurantId || !signingTarget || !user?.uid || !activeRole) {
@@ -397,11 +473,23 @@ export const IssuesView: React.FC = () => {
             <button
               id="issue-stock-btn"
               type="button"
-              onClick={() => setIsNewSessionModalOpen(true)}
+              onClick={handleOpenIssueWorkspace}
               className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-[#FF5A1F] hover:bg-[#e24c16] text-white text-xs font-bold shadow-xs transition-colors"
             >
-              <Plus className="w-4 h-4" />
-              <span>Issue Stock to Kitchen</span>
+              {savedDraft ? (
+                <>
+                  <History className="w-4 h-4" />
+                  <span>
+                    Resume Issue Draft ({savedDraft.cartItems.length}{' '}
+                    {savedDraft.cartItems.length === 1 ? 'item' : 'items'})
+                  </span>
+                </>
+              ) : (
+                <>
+                  <Plus className="w-4 h-4" />
+                  <span>Issue Stock to Kitchen</span>
+                </>
+              )}
             </button>
           )}
 
@@ -428,6 +516,95 @@ export const IssuesView: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Saved Unfinished Issue Stock Draft Recovery Banner */}
+      {canCreateIssueSession && savedDraft && !isNewSessionModalOpen && (
+        <div
+          id="saved-issue-draft-banner"
+          className="bg-amber-50/90 rounded-2xl border border-[#FF5A1F]/35 p-4 shadow-2xs space-y-3"
+        >
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start gap-3 min-w-0">
+              <div className="w-9 h-9 rounded-xl bg-[#0D2149] text-white flex items-center justify-center shrink-0">
+                <History className="w-4 h-4 text-[#FF5A1F]" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs font-extrabold text-[#0D2149]">
+                  Unfinished Issue Stock Draft Saved
+                </p>
+                <p className="text-[11px] text-amber-950 mt-0.5 leading-relaxed">
+                  <strong>
+                    {savedDraft.cartItems.length}{' '}
+                    {savedDraft.cartItems.length === 1 ? 'item' : 'items'}
+                  </strong>
+                  {' • '}
+                  {departments.find((d) => d.id === savedDraft.departmentId)?.name || 'Kitchen'}
+                  {' • '}
+                  {formatShiftLabel(savedDraft.shift)}
+                  {savedDraft.issueDate ? ` • ${formatDateKeyReadable(savedDraft.issueDate)}` : ''}
+                  {savedDraft.receivedByName ? ` • Receiver: ${savedDraft.receivedByName}` : ''}
+                  {' • '}
+                  <span className="text-stone-600">
+                    Saved{' '}
+                    {new Date(savedDraft.updatedAt).toLocaleTimeString([], {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </span>
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                id="resume-saved-issue-draft-btn"
+                type="button"
+                onClick={handleOpenIssueWorkspace}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#0D2149] hover:bg-[#153168] text-white text-xs font-bold shadow-2xs transition-colors"
+              >
+                <History className="w-3.5 h-3.5 text-[#FF5A1F]" />
+                <span>Resume Draft</span>
+              </button>
+              <button
+                id="request-clear-saved-draft-btn"
+                type="button"
+                onClick={() => setConfirmClearDraftBanner(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border border-stone-300 hover:border-rose-300 hover:text-rose-700 text-stone-700 text-xs font-semibold transition-colors"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Clear Draft</span>
+              </button>
+            </div>
+          </div>
+
+          {confirmClearDraftBanner && (
+            <div className="pt-2.5 border-t border-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+              <span className="font-semibold text-amber-950">
+                Discard this saved draft? Stock quantities have not been deducted and will remain unchanged.
+              </span>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  disabled={clearingDraft}
+                  onClick={() => setConfirmClearDraftBanner(false)}
+                  className="px-3 py-1.5 rounded-lg bg-white border border-stone-300 text-stone-700 font-semibold"
+                >
+                  Cancel
+                </button>
+                <button
+                  id="confirm-discard-saved-draft-btn"
+                  type="button"
+                  disabled={clearingDraft}
+                  onClick={() => void handleDiscardSavedDraft()}
+                  className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold disabled:opacity-50"
+                >
+                  {clearingDraft ? 'Clearing...' : 'Yes, Clear Draft'}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Inline Feedback Notice */}
       {feedbackNotice && (
@@ -647,11 +824,11 @@ export const IssuesView: React.FC = () => {
             <div className="pt-2">
               <button
                 type="button"
-                onClick={() => setIsNewSessionModalOpen(true)}
+                onClick={handleOpenIssueWorkspace}
                 className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#FF5A1F] hover:bg-[#e24c16] text-white text-xs font-bold"
               >
                 <Plus className="w-4 h-4" />
-                <span>Issue Stock to Kitchen</span>
+                <span>{savedDraft ? 'Resume Issue Draft' : 'Issue Stock to Kitchen'}</span>
               </button>
             </div>
           )}
@@ -978,7 +1155,7 @@ export const IssuesView: React.FC = () => {
         </>
       )}
 
-      {/* Multi-Item New Issue Session Modal */}
+      {/* Full-Screen Multi-Item Issue Stock Workspace (Auto-Save & Recovery) */}
       <NewIssueSessionModal
         isOpen={isNewSessionModalOpen}
         restaurantId={activeRestaurantId}
@@ -991,7 +1168,9 @@ export const IssuesView: React.FC = () => {
         actorUid={user?.uid || ''}
         actorName={userProfile?.name || user?.displayName || user?.email || 'Storekeeper'}
         actorRole={activeRole}
-        onClose={() => setIsNewSessionModalOpen(false)}
+        initialDraft={savedDraft}
+        onDraftUpdated={setSavedDraft}
+        onClose={handleCloseIssueWorkspace}
         onSuccess={handleSessionCreated}
       />
 

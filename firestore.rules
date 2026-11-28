@@ -95,6 +95,68 @@ service cloud.firestore {
              timestamp.date(int(parts[0]), int(parts[1]), int(parts[2])) <= request.time + duration.value(14, 'h');
     }
 
+    function isValidId(id) {
+      return id is string &&
+             id.size() >= 1 &&
+             id.size() <= 128 &&
+             id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidIssueSessionDraft(data, restaurantId, draftId) {
+      return data.keys().hasAll([
+               'draftId', 'draftSessionId', 'restaurantId', 'actorUid', 'status',
+               'departmentId', 'shift', 'issueDate', 'selectedReceiverUid', 'receivedByName',
+               'searchQuery', 'selectedItemId', 'quantityInput', 'cartItems',
+               'includeManagerSignature', 'managerSignatureDataUrl', 'updatedAt', 'updatedAtIso'
+             ]) &&
+             data.keys().hasOnly([
+               'draftId', 'draftSessionId', 'restaurantId', 'actorUid', 'status',
+               'departmentId', 'shift', 'issueDate', 'selectedReceiverUid', 'receivedByName',
+               'searchQuery', 'selectedItemId', 'quantityInput', 'cartItems',
+               'includeManagerSignature', 'managerSignatureDataUrl', 'updatedAt', 'updatedAtIso'
+             ]) &&
+             data.draftId == draftId &&
+             data.draftId == 'active_' + request.auth.uid &&
+             data.draftSessionId is string &&
+             data.draftSessionId.size() >= 6 &&
+             data.draftSessionId.size() <= 80 &&
+             data.draftSessionId.matches('^[a-zA-Z0-9_\\-]+$') &&
+             data.restaurantId == restaurantId &&
+             data.actorUid == request.auth.uid &&
+             data.status == 'DRAFT' &&
+             data.departmentId is string &&
+             data.departmentId.size() <= 128 &&
+             data.shift in ['MORNING', 'EVENING', 'NIGHT', 'GENERAL'] &&
+             data.issueDate is string &&
+             data.issueDate.size() <= 20 &&
+             data.selectedReceiverUid is string &&
+             data.selectedReceiverUid.size() <= 128 &&
+             data.receivedByName is string &&
+             data.receivedByName.size() <= 100 &&
+             data.searchQuery is string &&
+             data.searchQuery.size() <= 150 &&
+             data.selectedItemId is string &&
+             data.selectedItemId.size() <= 128 &&
+             data.quantityInput is string &&
+             data.quantityInput.size() <= 24 &&
+             data.cartItems is list &&
+             data.cartItems.size() <= 50 &&
+             (data.cartItems.size() == 0 || data.cartItems[0] is map) &&
+             data.includeManagerSignature is bool &&
+             (
+               data.managerSignatureDataUrl == null || (
+                 data.managerSignatureDataUrl is string &&
+                 data.managerSignatureDataUrl.matches('^data:image/png;base64,.*') &&
+                 data.managerSignatureDataUrl.size() <= 130000
+               )
+             ) &&
+             data.updatedAt is int &&
+             data.updatedAt > 0 &&
+             data.updatedAtIso is string &&
+             data.updatedAtIso.size() >= 10 &&
+             data.updatedAtIso.size() <= 40;
+    }
+
     function isValidIssueSessionCreate(data, restaurantId) {
       return data.restaurantId == restaurantId &&
              data.issuedByUid == request.auth.uid &&
@@ -436,6 +498,35 @@ service cloud.firestore {
           )
         );
         allow delete: if false; // Preserve confirmed issue session history
+      }
+
+      // Store to Kitchen Issue Drafts (auto-saved unfinished sessions — strictly tenant & user isolated, never deducts stock)
+      match /issueDrafts/{draftId} {
+        allow get: if isSignedIn() &&
+          isValidId(restaurantId) &&
+          isValidId(draftId) &&
+          draftId == 'active_' + request.auth.uid &&
+          isStorekeeper(restaurantId);
+        allow list: if false;
+        allow create: if isSignedIn() &&
+          isValidId(restaurantId) &&
+          isValidId(draftId) &&
+          draftId == 'active_' + request.auth.uid &&
+          isValidIssueSessionDraft(request.resource.data, restaurantId, draftId) &&
+          isStorekeeper(restaurantId);
+        allow update: if isSignedIn() &&
+          isValidId(restaurantId) &&
+          isValidId(draftId) &&
+          draftId == 'active_' + request.auth.uid &&
+          isValidIssueSessionDraft(request.resource.data, restaurantId, draftId) &&
+          request.resource.data.restaurantId == resource.data.restaurantId &&
+          request.resource.data.actorUid == resource.data.actorUid &&
+          isStorekeeper(restaurantId);
+        allow delete: if isSignedIn() &&
+          isValidId(restaurantId) &&
+          isValidId(draftId) &&
+          draftId == 'active_' + request.auth.uid &&
+          isStorekeeper(restaurantId);
       }
 
       // Emergency Issues

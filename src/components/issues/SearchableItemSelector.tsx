@@ -11,6 +11,8 @@ interface SearchableItemSelectorProps {
   items: Item[];
   loading?: boolean;
   selectedItemId: string;
+  searchQuery?: string;
+  onSearchQueryChange?: (query: string) => void;
   addedItemIds?: Set<string>;
   currencySymbol: string;
   onSelectItem: (item: Item | null) => void;
@@ -20,11 +22,23 @@ export const SearchableItemSelector: React.FC<SearchableItemSelectorProps> = ({
   items,
   loading = false,
   selectedItemId,
+  searchQuery,
+  onSearchQueryChange,
   addedItemIds,
   currencySymbol,
   onSelectItem,
 }) => {
-  const [query, setQuery] = useState('');
+  const [internalQuery, setInternalQuery] = useState('');
+  const isControlledQuery = typeof searchQuery === 'string' && typeof onSearchQueryChange === 'function';
+  const query = isControlledQuery ? searchQuery : internalQuery;
+  const setQuery = (next: string) => {
+    if (isControlledQuery) {
+      onSearchQueryChange(next);
+    } else {
+      setInternalQuery(next);
+    }
+  };
+
   const [isOpen, setIsOpen] = useState(false);
   const [highlightedIndex, setHighlightedIndex] = useState(0);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -35,12 +49,12 @@ export const SearchableItemSelector: React.FC<SearchableItemSelectorProps> = ({
     [items, selectedItemId]
   );
 
-  // Sync input display when parent clears selection
+  // For uncontrolled mode only: sync input display when parent clears selection
   useEffect(() => {
-    if (!selectedItemId) {
-      setQuery('');
+    if (!isControlledQuery && !selectedItemId) {
+      setInternalQuery('');
     }
-  }, [selectedItemId]);
+  }, [selectedItemId, isControlledQuery]);
 
   // Close dropdown on outside tap/click
   useEffect(() => {
@@ -81,6 +95,7 @@ export const SearchableItemSelector: React.FC<SearchableItemSelectorProps> = ({
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (!isOpen && (e.key === 'ArrowDown' || e.key === 'Enter')) {
+      e.preventDefault();
       setIsOpen(true);
       return;
     }
@@ -93,11 +108,13 @@ export const SearchableItemSelector: React.FC<SearchableItemSelectorProps> = ({
       e.preventDefault();
       setHighlightedIndex((prev) => (prev > 0 ? prev - 1 : 0));
     } else if (e.key === 'Enter') {
+      e.preventDefault();
       if (filteredItems[highlightedIndex]) {
-        e.preventDefault();
         handleChoose(filteredItems[highlightedIndex]);
       }
     } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
       setIsOpen(false);
     }
   };

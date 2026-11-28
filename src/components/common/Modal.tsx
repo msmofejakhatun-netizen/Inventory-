@@ -62,6 +62,7 @@ export const Modal: React.FC<ModalProps> = ({
           </div>
           <button
             id={`${id}-close-btn`}
+            type="button"
             onClick={onClose}
             className="p-1 rounded-md text-stone-400 hover:text-stone-700 hover:bg-stone-100 transition-colors"
           >

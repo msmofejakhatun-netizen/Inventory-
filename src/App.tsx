@@ -46,6 +46,45 @@ function getPublicLegalRoute(): 'privacy' | 'terms' | null {
   return null;
 }
 
+const ACTIVE_TAB_STORAGE_KEY = 'stoqo_active_tab_v1';
+const ALLOWED_NAV_TABS: ReadonlySet<NavTab> = new Set<NavTab>([
+  'dashboard',
+  'stock',
+  'where_money_went',
+  'purchases',
+  'purchase_orders',
+  'issues',
+  'emergency_issues',
+  'smart_preshift',
+  '15day_planner',
+  'vendors',
+  'vendor_payments',
+  'wastage',
+  'physical_audit',
+  'reports',
+  'pos_integration',
+  'ai_assistant',
+  'subscription',
+  'audit_logs',
+  'staff',
+  'settings',
+]);
+
+function readInitialActiveTab(): NavTab {
+  if (typeof window === 'undefined' || typeof window.sessionStorage === 'undefined') {
+    return 'dashboard';
+  }
+  try {
+    const saved = window.sessionStorage.getItem(ACTIVE_TAB_STORAGE_KEY) as NavTab | null;
+    if (saved && ALLOWED_NAV_TABS.has(saved)) {
+      return saved;
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return 'dashboard';
+}
+
 const AppContent: React.FC = () => {
   const {
     user,
@@ -58,13 +97,21 @@ const AppContent: React.FC = () => {
     userRestaurants,
     activeRestaurant,
   } = useAuth();
-  const [activeTab, setActiveTab] = useState<NavTab>('dashboard');
+  const [activeTab, setActiveTab] = useState<NavTab>(readInitialActiveTab);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isNotifsOpen, setIsNotifsOpen] = useState(false);
   const [isTransitionDone, setIsTransitionDone] = useState(false);
   const [publicLegalRoute, setPublicLegalRoute] = useState<'privacy' | 'terms' | null>(
     getPublicLegalRoute
   );
+
+  React.useEffect(() => {
+    try {
+      window.sessionStorage.setItem(ACTIVE_TAB_STORAGE_KEY, activeTab);
+    } catch {
+      // ignore storage errors
+    }
+  }, [activeTab]);
 
   React.useEffect(() => {
     const syncRoute = () => setPublicLegalRoute(getPublicLegalRoute());
