@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ShoppingCart,
   Plus,
@@ -33,28 +33,38 @@ import {
 import { exportToPdf, exportToCsv, exportInwardPurchaseBillPdf } from '../services/exportService';
 import { Modal } from '../components/common/Modal';
 import { Badge } from '../components/common/Badge';
+import { InwardItemSearchSelector } from '../components/purchases/InwardItemSearchSelector';
+import { getAllActiveInventoryItems, isActiveInventoryItem } from '../utils/inwardItemSearch';
+
+interface InwardDraftRow {
+  rowId: string;
+  itemId: string;
+  quantity: number;
+  rate: number;
+}
 
 export const PurchasesView: React.FC = () => {
   const { activeRestaurant, activeRestaurantId, user, userProfile } = useAuth();
 
   const [purchases, setPurchases] = useState<Purchase[]>([]);
   const [items, setItems] = useState<Item[]>([]);
+  const [itemsLoading, setItemsLoading] = useState(true);
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [payments, setPayments] = useState<VendorPayment[]>([]);
   const [loading, setLoading] = useState(true);
 
   // New Purchase Form Modal
+  const rowIdCounterRef = useRef(0);
+  const createRowId = useCallback(() => {
+    rowIdCounterRef.current += 1;
+    return `inward_row_${rowIdCounterRef.current}`;
+  }, []);
+
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [billNumber, setBillNumber] = useState('');
   const [billDate, setBillDate] = useState(new Date().toISOString().slice(0, 10));
   const [selectedVendorId, setSelectedVendorId] = useState('');
-  const [rows, setRows] = useState<
-    {
-      itemId: string;
-      quantity: number;
-      rate: number;
-    }[]
-  >([]);
+  const [rows, setRows] = useState<InwardDraftRow[]>([]);
 
   // Override purchase safeguard
   const [isOverride, setIsOverride] = useState(false);
@@ -83,6 +93,7 @@ export const PurchasesView: React.FC = () => {
 
   useEffect(() => {
     if (!activeRestaurantId) return;
+    setItemsLoading(true);
 
     const unsubPurchases = onSnapshot(
       query(collection(db, 'restaurants', activeRestaurantId, 'purchases'), orderBy('createdAt', 'desc'), limit(100)),
@@ -92,9 +103,23 @@ export const PurchasesView: React.FC = () => {
       }
     );
 
-    const unsubItems = onSnapshot(collection(db, 'restaurants', activeRestaurantId, 'items'), (snap) => {
-      setItems(snap.docs.map((d) => d.data() as Item));
-    });
+    // Load the restaurant's complete inventory (no limit or category restriction) for full active item search
+    const unsubItems = onSnapshot(
+      collection(db, 'restaurants', activeRestaurantId, 'items'),
+      (snap) => {
+        setItems(
+          snap.docs.map((d) => {
+            const data = d.data() as Item;
+            return { ...data, id: data.id || d.id };
+          })
+        );
+        setItemsLoading(false);
+      },
+      (err) => {
+        console.error('Failed to load inventory items:', err);
+        setItemsLoading(false);
+      }
+    );
 
     const unsubVendors = onSnapshot(collection(db, 'restaurants', activeRestaurantId, 'vendors'), (snap) => {
       const list = snap.docs.map((d) => d.data() as Vendor);
@@ -116,87 +141,128 @@ export const PurchasesView: React.FC = () => {
     };
   }, [activeRestaurantId]);
 
+  // Pre-compute complete active inventory list & lookup map once for high-performance searching across large catalogs
+  const activeItems = useMemo(() => getAllActiveInventoryItems(items), [items]);
+  const itemsById = useMemo(() => {
+    const map = new Map<string, Item>();
+    for (const item of items) {
+      if (item?.id) map.set(item.id, item);
+    }
+    return map;
+  }, [items]);
+
+  // Set of all item IDs currently selected in the bill (used to prevent accidental duplicate rows)
+  const selectedRowItemIds = useMemo(
+    () => new Set(rows.map((r) => r.itemId).filter(Boolean)),
+    [rows]
+  );
+
+  const handleClosePurchaseModal = useCallback(() => {
+    setIsModalOpen(false);
+  }, []);
+
   const openNewPurchaseModal = () => {
     setBillNumber('');
     setBillDate(new Date().toISOString().slice(0, 10));
     setSelectedVendorId(vendors[0]?.id || '');
-    setRows([{ itemId: items[0]?.id || '', quantity: 1, rate: items[0]?.lastPurchaseRate || 0 }]);
+    setRows([{ rowId: createRowId(), itemId: '', quantity: 1, rate: 0 }]);
     setIsOverride(false);
     setOverrideReason('');
     setFormError(null);
     setIsModalOpen(true);
   };
 
-  const addRow = () => {
-    const firstItem = items[0];
-    setRows([
-      ...rows,
+  const addRow = useCallback(() => {
+    setRows((prev) => [
+      ...prev,
       {
-        itemId: firstItem?.id || '',
+        rowId: createRowId(),
+        itemId: '',
         quantity: 1,
-        rate: firstItem?.lastPurchaseRate || 0,
+        rate: 0,
       },
     ]);
-  };
+  }, [createRowId]);
 
-  const removeRow = (index: number) => {
-    if (rows.length > 1) {
-      setRows(rows.filter((_, i) => i !== index));
-    }
-  };
-
-  const updateRow = (index: number, field: string, value: any) => {
-    const newRows = [...rows];
-    const currentRow = { ...newRows[index], [field]: value };
-
-    // If item changed, default rate to item's last rate
-    if (field === 'itemId') {
-      const selected = items.find((i) => i.id === value);
-      if (selected) {
-        currentRow.rate = selected.lastPurchaseRate || selected.averageStockRate || 0;
+  const removeRowById = useCallback((rowId: string) => {
+    setRows((prev) => {
+      if (prev.length <= 1) {
+        return prev.map((r) =>
+          r.rowId === rowId ? { ...r, itemId: '', quantity: 1, rate: 0 } : r
+        );
       }
-    }
+      return prev.filter((r) => r.rowId !== rowId);
+    });
+  }, []);
 
-    newRows[index] = currentRow;
-    setRows(newRows);
-  };
+  const handleSelectRowItem = useCallback((rowId: string, selected: Item | null) => {
+    setRows((prev) =>
+      prev.map((row) => {
+        if (row.rowId !== rowId) return row;
+        if (!selected) {
+          return { ...row, itemId: '' };
+        }
+        const defaultRate = Number(selected.lastPurchaseRate || selected.averageStockRate || 0);
+        return {
+          ...row,
+          itemId: selected.id,
+          rate: Number.isFinite(defaultRate) ? defaultRate : 0,
+        };
+      })
+    );
+    setFormError(null);
+  }, []);
+
+  const updateRowNumericField = useCallback(
+    (rowId: string, field: 'quantity' | 'rate', value: number) => {
+      setRows((prev) =>
+        prev.map((row) => (row.rowId === rowId ? { ...row, [field]: value } : row))
+      );
+      setFormError(null);
+    },
+    []
+  );
 
   // Process rows with AI Price Guard & Purchase Protection calculations
-  const analyzedRows: PurchaseItemRow[] = rows.map((r) => {
-    const item = items.find((i) => i.id === r.itemId);
-    const prevRate = item?.lastPurchaseRate || 0;
-    const currentRate = Number(r.rate) || 0;
-    const qty = Number(r.quantity) || 0;
-    const hikeAbs = currentRate - prevRate;
-    const hikePct = prevRate > 0 ? Number(((hikeAbs / prevRate) * 100).toFixed(2)) : 0;
-    const isPriceHike = hikeAbs > 0 && prevRate > 0;
+  const analyzedRows: PurchaseItemRow[] = useMemo(
+    () =>
+      rows.map((r) => {
+        const item = r.itemId ? itemsById.get(r.itemId) : undefined;
+        const prevRate = item?.lastPurchaseRate || 0;
+        const currentRate = Number(r.rate) || 0;
+        const qty = Number(r.quantity) || 0;
+        const hikeAbs = currentRate - prevRate;
+        const hikePct = prevRate > 0 ? Number(((hikeAbs / prevRate) * 100).toFixed(2)) : 0;
+        const isPriceHike = Boolean(item) && hikeAbs > 0 && prevRate > 0;
 
-    // Check if stock is above target
-    const currentStock = item?.currentStock || 0;
-    const targetDays = item?.targetStockDays || 5;
-    const isAboveTarget = Boolean(
-      item?.maximumStock && currentStock >= item.maximumStock
-    );
+        // Check if stock is above target
+        const currentStock = item?.currentStock || 0;
+        const targetDays = item?.targetStockDays || 5;
+        const isAboveTarget = Boolean(
+          item?.maximumStock && currentStock >= item.maximumStock
+        );
 
-    return {
-      itemId: r.itemId,
-      itemName: item?.name || 'Unknown Item',
-      category: item?.category || 'General',
-      unit: item?.unit || 'Unit',
-      quantity: qty,
-      rate: currentRate,
-      purchaseRate: currentRate,
-      total: Number((qty * currentRate).toFixed(2)),
-      amount: Number((qty * currentRate).toFixed(2)),
-      previousRate: prevRate,
-      priceHikeAbsolute: Number(hikeAbs.toFixed(2)),
-      priceHikePercent: hikePct,
-      isPriceHike,
-      currentStock,
-      targetStockDays: targetDays,
-      isAboveTarget,
-    };
-  });
+        return {
+          itemId: r.itemId,
+          itemName: item?.name || '',
+          category: item?.category || 'General',
+          unit: item?.unit || 'Unit',
+          quantity: qty,
+          rate: currentRate,
+          purchaseRate: currentRate,
+          total: Number((qty * currentRate).toFixed(2)),
+          amount: Number((qty * currentRate).toFixed(2)),
+          previousRate: prevRate,
+          priceHikeAbsolute: Number(hikeAbs.toFixed(2)),
+          priceHikePercent: hikePct,
+          isPriceHike,
+          currentStock,
+          targetStockDays: targetDays,
+          isAboveTarget,
+        };
+      }),
+    [rows, itemsById]
+  );
 
   // Strictly tax-free calculation: Line Amount = Received Qty x Actual Rate, Grand Total = Sum of Line Amounts
   const totalAmount = Number(analyzedRows.reduce((sum, r) => sum + r.total, 0).toFixed(2));
@@ -221,6 +287,38 @@ export const PurchasesView: React.FC = () => {
     if (analyzedRows.length === 0) {
       setFormError('Please add at least one item.');
       return;
+    }
+
+    const seenItemIds = new Set<string>();
+    for (let i = 0; i < rows.length; i += 1) {
+      const row = rows[i];
+      if (!row.itemId) {
+        setFormError(`Please search and select an inventory item for row #${i + 1}.`);
+        return;
+      }
+      const selectedItem = itemsById.get(row.itemId);
+      if (!selectedItem || !isActiveInventoryItem(selectedItem)) {
+        setFormError(
+          `Row #${i + 1} references an inactive or unavailable item. Please choose an active inventory item.`
+        );
+        return;
+      }
+      if (seenItemIds.has(row.itemId)) {
+        setFormError(
+          `"${selectedItem.name}" is listed more than once. Please combine quantities into a single row.`
+        );
+        return;
+      }
+      seenItemIds.add(row.itemId);
+
+      if (!Number.isFinite(row.quantity) || row.quantity <= 0) {
+        setFormError(`Received quantity for "${selectedItem.name}" must be greater than 0.`);
+        return;
+      }
+      if (!Number.isFinite(row.rate) || row.rate < 0) {
+        setFormError(`Actual purchase rate for "${selectedItem.name}" cannot be negative.`);
+        return;
+      }
     }
 
     // Purchase Protection Guard enforcement
@@ -651,8 +749,9 @@ export const PurchasesView: React.FC = () => {
 
       {/* Record Inward Bill Modal */}
       <Modal
+        id="record-inward-purchase-modal"
         isOpen={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
+        onClose={handleClosePurchaseModal}
         title="Record Inward Purchase Bill"
         subtitle="Recalculates Weighted Average Cost & verifies price hike thresholds"
         maxWidth="3xl"
@@ -674,7 +773,7 @@ export const PurchasesView: React.FC = () => {
                 required
                 value={selectedVendorId}
                 onChange={(e) => setSelectedVendorId(e.target.value)}
-                className="w-full px-3 py-2 text-xs border border-stone-300 rounded-lg bg-white"
+                className="w-full min-h-[42px] sm:min-h-[36px] px-3 py-2 text-base sm:text-xs border border-stone-300 rounded-lg bg-white"
               >
                 {vendors.map((v) => (
                   <option key={v.id} value={v.id}>
@@ -693,7 +792,7 @@ export const PurchasesView: React.FC = () => {
                 placeholder="e.g. INV-88219"
                 value={billNumber}
                 onChange={(e) => setBillNumber(e.target.value)}
-                className="w-full px-3 py-2 text-xs border border-stone-300 rounded-lg focus:outline-none focus:border-amber-500 font-mono"
+                className="w-full min-h-[42px] sm:min-h-[36px] px-3 py-2 text-base sm:text-xs border border-stone-300 rounded-lg focus:outline-none focus:border-amber-500 font-mono"
               />
             </div>
             <div>
@@ -704,97 +803,124 @@ export const PurchasesView: React.FC = () => {
                 type="date"
                 value={billDate}
                 onChange={(e) => setBillDate(e.target.value)}
-                className="w-full px-3 py-2 text-xs border border-stone-300 rounded-lg focus:outline-none focus:border-amber-500"
+                className="w-full min-h-[42px] sm:min-h-[36px] px-3 py-2 text-base sm:text-xs border border-stone-300 rounded-lg focus:outline-none focus:border-amber-500"
               />
             </div>
           </div>
 
           {/* Line Items Table */}
           <div className="border border-stone-200 rounded-xl overflow-hidden mt-4">
-            <div className="p-3 bg-stone-50 border-b border-stone-200 flex items-center justify-between">
-              <h4 className="text-xs font-bold text-stone-800 uppercase tracking-wider">
-                Inward Items
-              </h4>
+            <div className="p-3 bg-stone-50 border-b border-stone-200 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <h4 className="text-xs font-bold text-stone-800 uppercase tracking-wider">
+                  Inward Items ({rows.length})
+                </h4>
+                <span className="hidden sm:inline text-[11px] text-stone-400">
+                  · Searching {activeItems.length} active inventory items
+                </span>
+              </div>
               <button
+                id="inward-add-another-item-btn"
                 type="button"
                 onClick={addRow}
-                className="flex items-center gap-1 text-xs text-amber-700 font-bold hover:text-amber-900"
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 border border-amber-200 text-xs text-amber-800 font-bold transition-colors"
               >
                 <Plus className="w-3.5 h-3.5" /> Add Another Item
               </button>
             </div>
 
-            <div className="p-3 space-y-3 max-h-80 overflow-y-auto">
+            <div className="p-3 space-y-3 max-h-80 overflow-y-auto overscroll-contain">
               {rows.map((row, idx) => {
                 const analyzed = analyzedRows[idx];
+                const selectedItemObj = row.itemId ? itemsById.get(row.itemId) : undefined;
                 return (
                   <div
-                    key={idx}
-                    className="p-3 rounded-lg border border-stone-200 bg-white space-y-2 text-xs shadow-2xs"
+                    key={row.rowId}
+                    id={`inward-item-row-${row.rowId}`}
+                    className="p-3 rounded-lg border border-stone-200 bg-white space-y-2.5 text-xs shadow-2xs"
                   >
-                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-center">
+                    <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-start sm:items-end">
                       <div className="sm:col-span-5">
-                        <label className="text-[10px] text-stone-500 font-semibold uppercase block mb-1">
-                          Item
-                        </label>
-                        <select
-                          value={row.itemId}
-                          onChange={(e) => updateRow(idx, 'itemId', e.target.value)}
-                          className="w-full px-2.5 py-1.5 border border-stone-300 rounded-md bg-white text-xs font-medium"
-                        >
-                          {items.map((i) => (
-                            <option key={i.id} value={i.id}>
-                              {i.name} ({i.unit})
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-
-                      <div className="sm:col-span-2">
-                        <label className="text-[10px] text-stone-500 font-semibold uppercase block mb-1">
-                          Recv Qty ({analyzed.unit})
-                        </label>
-                        <input
-                          type="number"
-                          min={0.01}
-                          step="any"
-                          value={row.quantity}
-                          onChange={(e) => updateRow(idx, 'quantity', Number(e.target.value))}
-                          className="w-full px-2.5 py-1.5 border border-stone-300 rounded-md text-xs font-bold"
+                        <div className="flex items-center justify-between gap-1 mb-1">
+                          <label
+                            htmlFor={`inward-item-search-${row.rowId}`}
+                            className="text-[10px] text-stone-500 font-semibold uppercase"
+                          >
+                            Item #{idx + 1} *
+                          </label>
+                          {selectedItemObj && (
+                            <span className="px-1.5 py-0.5 rounded bg-stone-100 text-stone-700 font-mono text-[10px] font-bold uppercase">
+                              UOM: {selectedItemObj.unit}
+                            </span>
+                          )}
+                        </div>
+                        <InwardItemSearchSelector
+                          rowId={row.rowId}
+                          items={activeItems}
+                          loading={itemsLoading}
+                          selectedItemId={row.itemId}
+                          duplicateItemIds={selectedRowItemIds}
+                          currencySymbol={currencySymbol}
+                          onSelectItem={handleSelectRowItem}
                         />
                       </div>
 
-                      <div className="sm:col-span-2">
-                        <label className="text-[10px] text-stone-500 font-semibold uppercase block mb-1">
-                          Actual Rate ({currencySymbol})
-                        </label>
-                        <input
-                          type="number"
-                          min={0}
-                          step="any"
-                          value={row.rate}
-                          onChange={(e) => updateRow(idx, 'rate', Number(e.target.value))}
-                          className="w-full px-2.5 py-1.5 border border-stone-300 rounded-md text-xs font-bold"
-                        />
+                      <div className="grid grid-cols-2 sm:contents gap-2.5">
+                        <div className="sm:col-span-2">
+                          <label className="text-[10px] text-stone-500 font-semibold uppercase block mb-1">
+                            Recv Qty ({selectedItemObj ? selectedItemObj.unit : 'UOM'})
+                          </label>
+                          <input
+                            type="number"
+                            inputMode="decimal"
+                            min={0.01}
+                            step="any"
+                            value={row.quantity}
+                            onChange={(e) =>
+                              updateRowNumericField(row.rowId, 'quantity', Number(e.target.value))
+                            }
+                            className="w-full min-h-[42px] sm:min-h-[34px] px-2.5 py-1.5 border border-stone-300 rounded-lg text-base sm:text-xs font-bold focus:outline-none focus:border-amber-500"
+                          />
+                        </div>
+
+                        <div className="sm:col-span-2">
+                          <label className="text-[10px] text-stone-500 font-semibold uppercase block mb-1">
+                            Actual Rate ({currencySymbol})
+                          </label>
+                          <input
+                            type="number"
+                            inputMode="decimal"
+                            min={0}
+                            step="any"
+                            value={row.rate}
+                            onChange={(e) =>
+                              updateRowNumericField(row.rowId, 'rate', Number(e.target.value))
+                            }
+                            className="w-full min-h-[42px] sm:min-h-[34px] px-2.5 py-1.5 border border-stone-300 rounded-lg text-base sm:text-xs font-bold focus:outline-none focus:border-amber-500"
+                          />
+                        </div>
                       </div>
 
-                      <div className="sm:col-span-2 text-right">
-                        <label className="text-[10px] text-stone-500 font-semibold uppercase block mb-1">
-                          Line Amount
-                        </label>
-                        <span className="font-bold text-stone-900 font-mono block py-1.5">
-                          {currencySymbol}{analyzed.total.toFixed(2)}
-                        </span>
-                      </div>
+                      <div className="flex items-center justify-between sm:contents pt-1 sm:pt-0 border-t sm:border-t-0 border-stone-100">
+                        <div className="sm:col-span-2 sm:text-right">
+                          <label className="text-[10px] text-stone-500 font-semibold uppercase block mb-0.5 sm:mb-1">
+                            Line Amount
+                          </label>
+                          <span className="font-bold text-stone-900 font-mono block py-1 sm:py-1.5 text-sm sm:text-xs">
+                            {currencySymbol}{analyzed.total.toFixed(2)}
+                          </span>
+                        </div>
 
-                      <div className="sm:col-span-1 flex justify-end">
-                        <button
-                          type="button"
-                          onClick={() => removeRow(idx)}
-                          className="p-1.5 text-stone-400 hover:text-rose-600 rounded"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        <div className="sm:col-span-1 flex justify-end">
+                          <button
+                            type="button"
+                            aria-label={`Remove row ${idx + 1}`}
+                            onClick={() => removeRowById(row.rowId)}
+                            className="p-2 sm:p-1.5 text-stone-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
                     </div>
 
