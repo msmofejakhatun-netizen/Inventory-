@@ -34,13 +34,18 @@ import { exportToPdf, exportToCsv, exportInwardPurchaseBillPdf } from '../servic
 import { Modal } from '../components/common/Modal';
 import { Badge } from '../components/common/Badge';
 import { InwardItemSearchSelector } from '../components/purchases/InwardItemSearchSelector';
-import { getAllActiveInventoryItems, isActiveInventoryItem } from '../utils/inwardItemSearch';
+import {
+  getAllActiveInventoryItems,
+  getEffectiveCurrentItemRate,
+  isActiveInventoryItem,
+} from '../utils/inwardItemSearch';
 
 interface InwardDraftRow {
   rowId: string;
   itemId: string;
   quantity: number;
   rate: number;
+  isRateManuallyEdited?: boolean;
 }
 
 export const PurchasesView: React.FC = () => {
@@ -150,12 +155,34 @@ export const PurchasesView: React.FC = () => {
     }
     return map;
   }, [items]);
+  const itemsByIdRef = useRef(itemsById);
+  itemsByIdRef.current = itemsById;
 
   // Set of all item IDs currently selected in the bill (used to prevent accidental duplicate rows)
   const selectedRowItemIds = useMemo(
     () => new Set(rows.map((r) => r.itemId).filter(Boolean)),
     [rows]
   );
+
+  // Keep unedited selected rows automatically synced if an item's Current Item Rate updates live in Firestore
+  useEffect(() => {
+    if (!isModalOpen) return;
+    setRows((prev) => {
+      let changed = false;
+      const next = prev.map((row) => {
+        if (!row.itemId || row.isRateManuallyEdited) return row;
+        const latestItem = itemsById.get(row.itemId);
+        if (!latestItem) return row;
+        const latestCurrentRate = getEffectiveCurrentItemRate(latestItem);
+        if (row.rate !== latestCurrentRate) {
+          changed = true;
+          return { ...row, rate: latestCurrentRate };
+        }
+        return row;
+      });
+      return changed ? next : prev;
+    });
+  }, [isModalOpen, itemsById]);
 
   const handleClosePurchaseModal = useCallback(() => {
     setIsModalOpen(false);
@@ -165,7 +192,7 @@ export const PurchasesView: React.FC = () => {
     setBillNumber('');
     setBillDate(new Date().toISOString().slice(0, 10));
     setSelectedVendorId(vendors[0]?.id || '');
-    setRows([{ rowId: createRowId(), itemId: '', quantity: 1, rate: 0 }]);
+    setRows([{ rowId: createRowId(), itemId: '', quantity: 1, rate: 0, isRateManuallyEdited: false }]);
     setIsOverride(false);
     setOverrideReason('');
     setFormError(null);
@@ -180,6 +207,7 @@ export const PurchasesView: React.FC = () => {
         itemId: '',
         quantity: 1,
         rate: 0,
+        isRateManuallyEdited: false,
       },
     ]);
   }, [createRowId]);
@@ -188,7 +216,9 @@ export const PurchasesView: React.FC = () => {
     setRows((prev) => {
       if (prev.length <= 1) {
         return prev.map((r) =>
-          r.rowId === rowId ? { ...r, itemId: '', quantity: 1, rate: 0 } : r
+          r.rowId === rowId
+            ? { ...r, itemId: '', quantity: 1, rate: 0, isRateManuallyEdited: false }
+            : r
         );
       }
       return prev.filter((r) => r.rowId !== rowId);
@@ -200,13 +230,16 @@ export const PurchasesView: React.FC = () => {
       prev.map((row) => {
         if (row.rowId !== rowId) return row;
         if (!selected) {
-          return { ...row, itemId: '' };
+          return { ...row, itemId: '', rate: 0, isRateManuallyEdited: false };
         }
-        const defaultRate = Number(selected.lastPurchaseRate || selected.averageStockRate || 0);
+        // Always resolve the latest saved inventory record from live Firestore state
+        const latestItem = itemsByIdRef.current.get(selected.id) || selected;
+        const defaultRate = getEffectiveCurrentItemRate(latestItem);
         return {
           ...row,
-          itemId: selected.id,
-          rate: Number.isFinite(defaultRate) ? defaultRate : 0,
+          itemId: latestItem.id,
+          rate: defaultRate,
+          isRateManuallyEdited: false,
         };
       })
     );
@@ -216,7 +249,15 @@ export const PurchasesView: React.FC = () => {
   const updateRowNumericField = useCallback(
     (rowId: string, field: 'quantity' | 'rate', value: number) => {
       setRows((prev) =>
-        prev.map((row) => (row.rowId === rowId ? { ...row, [field]: value } : row))
+        prev.map((row) =>
+          row.rowId === rowId
+            ? {
+                ...row,
+                [field]: value,
+                ...(field === 'rate' ? { isRateManuallyEdited: true } : {}),
+              }
+            : row
+        )
       );
       setFormError(null);
     },

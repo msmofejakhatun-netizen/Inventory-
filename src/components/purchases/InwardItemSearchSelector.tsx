@@ -4,6 +4,7 @@ import { AlertCircle, Check, Loader2, Package, Search, X } from 'lucide-react';
 import { Item } from '../../types';
 import {
   formatInwardItemOptionLabel,
+  getEffectiveCurrentItemRate,
   searchActiveInventoryItems,
 } from '../../utils/inwardItemSearch';
 
@@ -307,7 +308,7 @@ export const InwardItemSearchSelector: React.FC<InwardItemSearchSelectorProps> =
                     const isSelected = item.id === selectedItemId;
                     const isDuplicate = duplicateItemIds.has(item.id) && !isSelected;
                     const isHighlighted = idx === highlightedIndex;
-                    const refRate = Number(item.lastPurchaseRate || item.averageStockRate || 0);
+                    const currentRate = getEffectiveCurrentItemRate(item);
 
                     return (
                       <button
@@ -344,11 +345,11 @@ export const InwardItemSearchSelector: React.FC<InwardItemSearchSelectorProps> =
                               </span>
                             )}
                           </div>
-                          {(item.category || refRate > 0) && (
+                          {(item.category || currentRate > 0) && (
                             <p className="text-[11px] text-stone-400 mt-0.5 truncate">
                               {item.category || 'Inventory'}
-                              {refRate > 0
-                                ? ` · Last rate: ${currencySymbol}${refRate.toFixed(2)}/${item.unit}`
+                              {currentRate > 0
+                                ? ` · Current rate: ${currencySymbol}${currentRate.toFixed(2)}/${item.unit}`
                                 : ''}
                             </p>
                           )}

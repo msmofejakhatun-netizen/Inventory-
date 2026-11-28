@@ -41,6 +41,31 @@ export function formatInwardItemOptionLabel(item: Pick<Item, 'name' | 'unit'>): 
 }
 
 /**
+ * Single source of truth for resolving an item's manually editable Current Item Rate / Default Purchase Rate.
+ * Strictly prioritizes `item.currentItemRate` whenever saved on the Firestore item document (including 0),
+ * and falls back to `lastPurchaseRate` / `averageStockRate` ONLY for legacy items where `currentItemRate` was never set.
+ * Never mutates WAC (`averageStockRate`) or historical `lastPurchaseRate`.
+ */
+export function getEffectiveCurrentItemRate(
+  item: Pick<Item, 'currentItemRate' | 'lastPurchaseRate' | 'averageStockRate'> | null | undefined
+): number {
+  if (!item) return 0;
+  if (
+    item.currentItemRate !== undefined &&
+    item.currentItemRate !== null &&
+    String(item.currentItemRate).trim() !== '' &&
+    Number.isFinite(Number(item.currentItemRate)) &&
+    Number(item.currentItemRate) >= 0
+  ) {
+    return Number(Number(item.currentItemRate).toFixed(2));
+  }
+  const legacyFallback = Number(item.lastPurchaseRate || item.averageStockRate || 0);
+  return Number.isFinite(legacyFallback) && legacyFallback >= 0
+    ? Number(legacyFallback.toFixed(2))
+    : 0;
+}
+
+/**
  * Case-insensitive, partial-match search across the ENTIRE active inventory list.
  * Supports single-word and multi-word partial queries (e.g. "ric", "RICE", "paper nap", "napkin")
  * without limiting results to the first N items or a single category.

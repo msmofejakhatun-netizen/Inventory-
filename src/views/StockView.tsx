@@ -50,6 +50,7 @@ import {
 } from '../services/restaurantService';
 import { Modal } from '../components/common/Modal';
 import { Badge } from '../components/common/Badge';
+import { getEffectiveCurrentItemRate } from '../utils/inwardItemSearch';
 import {
   EditStockModal,
   StockAdjustmentSuccessPayload,
@@ -147,16 +148,7 @@ export const StockView: React.FC = () => {
 
   const currencySymbol = activeRestaurant?.currencySymbol || '₹';
 
-  const getEffectiveCurrentRate = (item: Item): number => {
-    if (
-      item.currentItemRate !== undefined &&
-      item.currentItemRate !== null &&
-      !Number.isNaN(Number(item.currentItemRate))
-    ) {
-      return Math.max(0, Number(item.currentItemRate));
-    }
-    return Math.max(0, Number(item.lastPurchaseRate || item.averageStockRate || 0));
-  };
+  const getEffectiveCurrentRate = (item: Item): number => getEffectiveCurrentItemRate(item);
 
   // Reset selection and notice when switching restaurants
   useEffect(() => {
@@ -172,7 +164,12 @@ export const StockView: React.FC = () => {
     if (!activeRestaurantId) return;
 
     const unsubItems = onSnapshot(collection(db, 'restaurants', activeRestaurantId, 'items'), (snap) => {
-      setItems(snap.docs.map((d) => d.data() as Item));
+      setItems(
+        snap.docs.map((d) => {
+          const data = d.data() as Item;
+          return { ...data, id: data.id || d.id };
+        })
+      );
       setLoading(false);
     });
 
@@ -711,6 +708,7 @@ export const StockView: React.FC = () => {
             category: itemCat || 'General',
             unit: normalizeImportedUnit(itemUnit),
             currentStock: Number(currentQty) || 0,
+            currentItemRate: Number(avgRate) || 0,
             averageStockRate: Number(avgRate) || 0,
             lastPurchaseRate: Number(avgRate) || 0,
             minimumStock: Number(minStock) || 5,
@@ -2013,7 +2011,7 @@ export const StockView: React.FC = () => {
                 </div>
               </div>
               <p className="text-[11px] text-stone-500 leading-relaxed">
-                Used as the default estimated rate for new Purchase Orders. Updating this rate does not modify existing stock valuation, Weighted Average Cost (WAC), or historical invoices.
+                Used as the default purchase rate for Inward Purchase Bills and new Purchase Orders. Updating this rate does not modify existing stock valuation, Weighted Average Cost (WAC), or historical invoices.
               </p>
             </div>
           )}
